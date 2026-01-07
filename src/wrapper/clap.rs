@@ -4,6 +4,7 @@ mod util;
 mod context;
 mod descriptor;
 pub mod features;
+pub mod reaper_embed;
 mod wrapper;
 
 /// Re-export for the macro

@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use crate::prelude::{
-    AsyncExecutor, AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, Editor, InitContext,
-    MidiConfig, Params, PluginState, ProcessContext, SysExMessage,
+    AsyncExecutor, AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, Editor, EmbeddedEditor,
+    InitContext, MidiConfig, Params, PluginState, ProcessContext, SysExMessage,
 };
 
 pub mod clap;
@@ -166,6 +166,22 @@ pub trait Plugin: Default + Send + 'static {
         None
     }
 
+    /// Returns an embedded (inline) editor for REAPER's TCP/MCP panel, if supported.
+    ///
+    /// This is separate from the regular [`editor()`][Self::editor()] and provides a small inline
+    /// UI that renders directly in REAPER's track or mixer panel. This is useful for showing
+    /// meters, simple controls, or visualizations without opening a full editor window.
+    ///
+    /// The embedded editor renders to a CPU bitmap buffer, so it should be lightweight and avoid
+    /// expensive rendering operations.
+    ///
+    /// Note: This is currently only supported in REAPER via the CLAP plugin format.
+    ///
+    /// Queried only once immediately after the plugin instance is created.
+    fn embedded_editor(&mut self) -> Option<Arc<dyn EmbeddedEditor>> {
+        None
+    }
+
     /// This function is always called just before a [`PluginState`] is loaded. This lets you
     /// directly modify old plugin state to perform migrations based on the [`PluginState::version`]
     /// field. Some examples of use cases for this are renaming parameter indices, remapping
@@ -252,6 +268,16 @@ pub trait Plugin: Default + Send + 'static {
     /// `initialize()` may be called more than once before `deactivate()` is called, for instance
     /// when restoring state while the plugin is still activate.
     fn deactivate(&mut self) {}
+
+    /// Called when the host stops processing audio. This is different from [`deactivate()`][Self::deactivate()]
+    /// in that the plugin remains active but audio processing has temporarily stopped.
+    ///
+    /// This is useful for plugins that need to clear visual state (like analyzers or meters)
+    /// when there's no audio being processed. Unlike `reset()`, this is specifically for when
+    /// the host stops calling `process()` temporarily.
+    ///
+    /// The default implementation does nothing.
+    fn process_stopped(&mut self) {}
 }
 
 /// Indicates the current situation after the plugin has processed audio.

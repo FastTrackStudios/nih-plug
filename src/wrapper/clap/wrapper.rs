@@ -79,13 +79,16 @@ use std::time::Duration;
 
 use super::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use super::descriptor::PluginDescriptor;
+use super::reaper_embed::{
+    handle_embed_message, ClapPluginReaperEmbedUi, CLAP_EXT_REAPER_EMBED_UI,
+};
 use super::util::ClapPtr;
 use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
 use crate::midi::MidiResult;
 use crate::prelude::{
-    AsyncExecutor, AudioIOLayout, AuxiliaryBuffers, BufferConfig, ClapPlugin, Editor, MidiConfig,
-    NoteEvent, ParamFlags, ParamPtr, Params, ParentWindowHandle, Plugin, PluginNoteEvent,
-    ProcessMode, ProcessStatus, SysExMessage, TaskExecutor, Transport,
+    AsyncExecutor, AudioIOLayout, AuxiliaryBuffers, BufferConfig, ClapPlugin, Editor,
+    EmbeddedEditor, MidiConfig, NoteEvent, ParamFlags, ParamPtr, Params, ParentWindowHandle,
+    Plugin, PluginNoteEvent, ProcessMode, ProcessStatus, SysExMessage, TaskExecutor, Transport,
 };
 use crate::util::permit_alloc;
 use crate::wrapper::clap::context::RemoteControlPages;
@@ -124,6 +127,12 @@ pub struct Wrapper<P: ClapPlugin> {
     /// the sizes communicated to and from the DAW should be scaled by this factor since NIH-plug's
     /// APIs only deal in logical pixels.
     editor_scaling_factor: AtomicF32,
+
+    /// The plugin's embedded editor for REAPER's inline FX UI, if it has one.
+    /// Wrapped in an `AtomicRefCell` because it needs to be initialized late.
+    embedded_editor: AtomicRefCell<Option<Arc<dyn EmbeddedEditor>>>,
+    /// The CLAP extension vtable for REAPER's embedded UI.
+    clap_plugin_reaper_embed_ui: ClapPluginReaperEmbedUi,
 
     is_processing: AtomicBool,
     /// The current IO configuration, modified through the `clap_plugin_audio_ports_config`
@@ -543,6 +552,12 @@ impl<P: ClapPlugin> Wrapper<P> {
             editor_handle: Mutex::new(None),
             editor_scaling_factor: AtomicF32::new(1.0),
 
+            // Initialized later as it needs a reference to the plugin
+            embedded_editor: AtomicRefCell::new(None),
+            clap_plugin_reaper_embed_ui: ClapPluginReaperEmbedUi {
+                inline_editor: Some(Self::ext_reaper_embed_inline_editor),
+            },
+
             is_processing: AtomicBool::new(false),
             current_audio_io_layout: AtomicCell::new(
                 P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default(),
@@ -719,6 +734,9 @@ impl<P: ClapPlugin> Wrapper<P> {
                 }),
             })
             .map(Mutex::new);
+
+        // Initialize the embedded editor for REAPER's inline UI support
+        *wrapper.embedded_editor.borrow_mut() = wrapper.plugin.lock().embedded_editor();
 
         // Same with the background thread
         *wrapper.background_thread.borrow_mut() =
@@ -1939,6 +1957,10 @@ impl<P: ClapPlugin> Wrapper<P> {
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
         wrapper.is_processing.store(false, Ordering::SeqCst);
+
+        // Notify the plugin that processing has stopped
+        // This allows analyzers/meters to clear their visual state
+        process_wrapper(|| wrapper.plugin.lock().process_stopped());
     }
 
     unsafe extern "C" fn reset(plugin: *const clap_plugin) {
@@ -2337,6 +2359,9 @@ impl<P: ClapPlugin> Wrapper<P> {
             &wrapper.clap_plugin_tail as *const _ as *const c_void
         } else if id == CLAP_EXT_VOICE_INFO && P::CLAP_POLY_MODULATION_CONFIG.is_some() {
             &wrapper.clap_plugin_voice_info as *const _ as *const c_void
+        } else if id == CLAP_EXT_REAPER_EMBED_UI && wrapper.embedded_editor.borrow().is_some() {
+            // Only report that we support this extension if the plugin has an embedded editor
+            &wrapper.clap_plugin_reaper_embed_ui as *const _ as *const c_void
         } else {
             nih_trace!("Host tried to query unknown extension {:?}", id);
             std::ptr::null()
@@ -3208,6 +3233,32 @@ impl<P: ClapPlugin> Wrapper<P> {
                 true
             }
             None => false,
+        }
+    }
+
+    /// REAPER's embedded UI extension callback.
+    ///
+    /// This handles all messages from REAPER for inline FX UI rendering in the TCP/MCP.
+    unsafe extern "C" fn ext_reaper_embed_inline_editor(
+        plugin: *const clap_plugin,
+        msg: i32,
+        param1: *mut c_void,
+        param2: *mut c_void,
+    ) -> isize {
+        check_null_ptr!(0, plugin, (*plugin).plugin_data);
+        let wrapper = &*((*plugin).plugin_data as *const Self);
+
+        // Get the embedded editor - this extension is only exposed when we have one
+        match &*wrapper.embedded_editor.borrow() {
+            Some(embedded_editor) => {
+                handle_embed_message(embedded_editor, msg, param1, param2)
+            }
+            None => {
+                nih_debug_assert_failure!(
+                    "REAPER embed UI callback received but no embedded editor is registered"
+                );
+                0
+            }
         }
     }
 }

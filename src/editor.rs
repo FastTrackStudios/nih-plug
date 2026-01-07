@@ -1,11 +1,18 @@
 //! Traits for working with plugin editors.
 
+pub mod embedded;
+
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use std::any::Any;
 use std::ffi::c_void;
 use std::sync::Arc;
 
 use crate::prelude::GuiContext;
+
+// Re-export embedded editor types
+pub use embedded::{
+    EmbedBitmap, EmbedContext, EmbedDrawInfo, EmbedMouseEvent, EmbedSizeHints, EmbeddedEditor,
+};
 
 /// An editor for a [`Plugin`][crate::prelude::Plugin].
 pub trait Editor: Send {
