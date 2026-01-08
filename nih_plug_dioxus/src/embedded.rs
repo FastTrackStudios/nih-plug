@@ -497,19 +497,31 @@ impl EmbeddedEditor for DioxusEmbeddedEditor {
     }
 }
 
-/// Copy an RGBA buffer to an EmbedBitmap.
+/// Apply gamma correction (gamma 2.2) to convert linear RGB to display gamma.
+/// This darkens the colors to compensate for Vello CPU's linear output.
+#[inline]
+fn apply_gamma(value: u8) -> u8 {
+    // Simple gamma 2.2 curve: output = input^(1/2.2)
+    // But we need the INVERSE since we're going from linear to gamma-corrected
+    // Actually for "washed out" colors, we need to apply gamma (darken)
+    let normalized = value as f32 / 255.0;
+    let corrected = normalized.powf(2.2); // Apply gamma to darken
+    (corrected * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Copy an RGBA buffer to an EmbedBitmap with gamma correction.
 ///
-/// The buffer is expected to be in RGBA format (already sRGB from Vello CPU renderer).
-/// EmbedBitmap uses the platform's native format (typically BGRA on most systems).
+/// Vello CPU outputs linear RGB which appears washed out on displays.
+/// We apply gamma 2.2 to correct the colors.
 fn copy_rgba_to_bitmap(buffer: &[u8], bitmap: &mut EmbedBitmap<'_>, width: u32, height: u32) {
     for y in 0..height {
         for x in 0..width {
             let idx = ((y * width + x) * 4) as usize;
             if idx + 3 < buffer.len() {
-                let r = buffer[idx];
-                let g = buffer[idx + 1];
-                let b = buffer[idx + 2];
-                let a = buffer[idx + 3];
+                let r = apply_gamma(buffer[idx]);
+                let g = apply_gamma(buffer[idx + 1]);
+                let b = apply_gamma(buffer[idx + 2]);
+                let a = buffer[idx + 3]; // Alpha doesn't need gamma
                 bitmap.set_pixel(x, y, EmbedBitmap::rgba(r, g, b, a));
             }
         }
@@ -540,9 +552,9 @@ fn scale_rgba_to_bitmap(
             
             let idx = ((src_y * src_width + src_x) * 4) as usize;
             if idx + 3 < src_buffer.len() {
-                let r = src_buffer[idx];
-                let g = src_buffer[idx + 1];
-                let b = src_buffer[idx + 2];
+                let r = apply_gamma(src_buffer[idx]);
+                let g = apply_gamma(src_buffer[idx + 1]);
+                let b = apply_gamma(src_buffer[idx + 2]);
                 let a = src_buffer[idx + 3];
                 bitmap.set_pixel(dst_x, dst_y, EmbedBitmap::rgba(r, g, b, a));
             }
