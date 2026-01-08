@@ -497,34 +497,19 @@ impl EmbeddedEditor for DioxusEmbeddedEditor {
     }
 }
 
-/// Convert a linear RGB value (0-255) to sRGB.
-/// Vello CPU renderer outputs linear RGB, but displays expect sRGB.
-#[inline]
-fn linear_to_srgb(linear: u8) -> u8 {
-    let linear_f = linear as f32 / 255.0;
-    let srgb_f = if linear_f <= 0.0031308 {
-        linear_f * 12.92
-    } else {
-        1.055 * linear_f.powf(1.0 / 2.4) - 0.055
-    };
-    (srgb_f * 255.0).round().clamp(0.0, 255.0) as u8
-}
-
-/// Copy an RGBA buffer to an EmbedBitmap, converting from linear RGB to sRGB.
+/// Copy an RGBA buffer to an EmbedBitmap.
 ///
-/// The buffer is expected to be in linear RGBA format (from Vello CPU renderer).
+/// The buffer is expected to be in RGBA format (already sRGB from Vello CPU renderer).
 /// EmbedBitmap uses the platform's native format (typically BGRA on most systems).
-/// We apply gamma correction to convert from linear to sRGB color space.
 fn copy_rgba_to_bitmap(buffer: &[u8], bitmap: &mut EmbedBitmap<'_>, width: u32, height: u32) {
     for y in 0..height {
         for x in 0..width {
             let idx = ((y * width + x) * 4) as usize;
             if idx + 3 < buffer.len() {
-                // Convert linear RGB to sRGB
-                let r = linear_to_srgb(buffer[idx]);
-                let g = linear_to_srgb(buffer[idx + 1]);
-                let b = linear_to_srgb(buffer[idx + 2]);
-                let a = buffer[idx + 3]; // Alpha doesn't need conversion
+                let r = buffer[idx];
+                let g = buffer[idx + 1];
+                let b = buffer[idx + 2];
+                let a = buffer[idx + 3];
                 bitmap.set_pixel(x, y, EmbedBitmap::rgba(r, g, b, a));
             }
         }
@@ -535,7 +520,6 @@ fn copy_rgba_to_bitmap(buffer: &[u8], bitmap: &mut EmbedBitmap<'_>, width: u32, 
 ///
 /// This is used to display a cached frame while waiting for a re-render at the new size,
 /// which reduces flicker during resize operations.
-/// Also converts from linear RGB to sRGB color space.
 fn scale_rgba_to_bitmap(
     src_buffer: &[u8],
     src_width: u32,
@@ -556,11 +540,10 @@ fn scale_rgba_to_bitmap(
             
             let idx = ((src_y * src_width + src_x) * 4) as usize;
             if idx + 3 < src_buffer.len() {
-                // Convert linear RGB to sRGB
-                let r = linear_to_srgb(src_buffer[idx]);
-                let g = linear_to_srgb(src_buffer[idx + 1]);
-                let b = linear_to_srgb(src_buffer[idx + 2]);
-                let a = src_buffer[idx + 3]; // Alpha doesn't need conversion
+                let r = src_buffer[idx];
+                let g = src_buffer[idx + 1];
+                let b = src_buffer[idx + 2];
+                let a = src_buffer[idx + 3];
                 bitmap.set_pixel(dst_x, dst_y, EmbedBitmap::rgba(r, g, b, a));
             }
         }
