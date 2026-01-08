@@ -76,11 +76,15 @@ impl WgpuState {
         let queue = Arc::new(queue);
 
         // Configure the surface
+        // IMPORTANT: Use NON-sRGB format to avoid double gamma correction.
+        // Vello/Blitz renders CSS colors (which are sRGB) and handles the conversion internally.
+        // If we use an sRGB surface format, the GPU applies an additional gamma curve
+        // which makes dark colors appear lighter (washed out).
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps
             .formats
             .iter()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 

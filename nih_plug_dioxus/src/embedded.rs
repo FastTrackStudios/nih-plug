@@ -497,15 +497,13 @@ impl EmbeddedEditor for DioxusEmbeddedEditor {
     }
 }
 
-/// Apply gamma correction (gamma 2.2) to convert linear RGB to display gamma.
-/// This darkens the colors to compensate for Vello CPU's linear output.
+/// Apply gamma correction to compensate for color space differences.
+/// Vello CPU outputs colors that appear washed out, this darkens them slightly.
+/// Using gamma 1.6 as a compromise (less aggressive than 2.2).
 #[inline]
 fn apply_gamma(value: u8) -> u8 {
-    // Simple gamma 2.2 curve: output = input^(1/2.2)
-    // But we need the INVERSE since we're going from linear to gamma-corrected
-    // Actually for "washed out" colors, we need to apply gamma (darken)
     let normalized = value as f32 / 255.0;
-    let corrected = normalized.powf(2.2); // Apply gamma to darken
+    let corrected = normalized.powf(1.6);
     (corrected * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
