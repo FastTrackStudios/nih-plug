@@ -1,0 +1,66 @@
+[package]
+name = "nih_plug_dioxus"
+version = "0.0.0"
+edition = "2021"
+authors = ["Cody Wright"]
+license = "ISC"
+description = "Dioxus Native GUI support for NIH-plug"
+
+[features]
+default = ["hot-reload"]
+hot-reload = ["dep:dioxus-devtools"]
+# Enable embedded editor support (requires nih-plug fork with embedded editor support)
+embedded = ["dep:anyrender_vello_cpu", "dep:anyrender"]
+
+[dependencies]
+nih_plug = { path = "..", default-features = false }
+
+# Dioxus core
+dioxus = { version = "0.7", default-features = false, features = ["html", "hooks", "signals", "macro"] }
+
+# Dioxus Native DOM (from crates.io)
+dioxus-native-dom = "0.7"
+
+# Blitz (from crates.io)
+blitz-dom = "0.2"
+blitz-paint = "0.2"
+blitz-traits = "0.2"
+
+# Rendering
+anyrender_vello = "0.6"
+vello = { version = "0.6", features = ["wgpu"] }
+wgpu = "26"
+wgpu_context = "0.1"  # For DeviceHandle type used by CustomPaintSource
+
+# CPU rendering for embedded editor (optional)
+anyrender_vello_cpu = { version = "0.8", optional = true }
+anyrender = { version = "0.6", optional = true }
+
+# Window management - using latest from git
+baseview = { git = "https://github.com/RustAudio/baseview.git" }
+
+# raw-window-handle (0.6 for wgpu, 0.5 aliased for baseview compatibility)
+raw-window-handle = "0.6"
+raw-window-handle-05 = { package = "raw-window-handle", version = "0.5" }
+
+# Hot reload
+dioxus-devtools = { version = "0.7", optional = true }
+
+# Utilities
+crossbeam = "0.8"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+futures-util = "0.3"
+pollster = "0.4"
+# Use the same keyboard-types version as baseview to avoid conflicts
+keyboard-types = "0.6"
+
+# Examples are disabled for now (require additional dependencies from lib-ref)
+# [[example]]
+# name = "standalone"
+# path = "examples/standalone.rs"
+
+[dev-dependencies]
+# Example needs these directly
+pollster = "0.4"
+raw-window-handle-05 = { package = "raw-window-handle", version = "0.5" }

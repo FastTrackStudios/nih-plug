@@ -14,27 +14,32 @@ repository = "https://github.com/robbert-vdh/nih-plug"
 resolver = "2"
 members = [
   "nih_plug_derive",
-  "nih_plug_egui",
-  "nih_plug_iced",
-  "nih_plug_vizia",
+  "nih_plug_dioxus",
   "nih_plug_xtask",
 
   "cargo_nih_plug",
   "xtask",
 
+  "plugins/examples/gain",
+  "plugins/examples/midi_inverter",
+  "plugins/examples/sine",
+  "plugins/examples/wgpu_reaper_demo",
+]
+
+# Exclude the GUI frameworks that have dependency conflicts
+exclude = [
+  "nih_plug_egui",
+  "nih_plug_iced",
+  "nih_plug_vizia",
   "plugins/examples/byo_gui_gl",
   "plugins/examples/byo_gui_softbuffer",
   "plugins/examples/byo_gui_wgpu",
-  "plugins/examples/gain",
   "plugins/examples/gain_gui_egui",
   "plugins/examples/gain_gui_iced",
   "plugins/examples/gain_gui_vizia",
-  "plugins/examples/midi_inverter",
   "plugins/examples/poly_mod_synth",
-  "plugins/examples/sine",
   "plugins/examples/stft",
   "plugins/examples/sysex",
-
   "plugins/soft_vacuum",
   "plugins/buffr_glitch",
   "plugins/crisp",

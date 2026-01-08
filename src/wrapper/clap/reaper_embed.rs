@@ -12,7 +12,6 @@ use clap_sys::plugin::clap_plugin;
 use crate::prelude::{
     EmbedBitmap, EmbedContext, EmbedDrawInfo, EmbedMouseEvent, EmbedSizeHints, EmbeddedEditor,
 };
-use crate::nih_log;
 
 /// The extension ID for REAPER's embedded UI CLAP extension.
 pub const CLAP_EXT_REAPER_EMBED_UI: &CStr =
@@ -270,11 +269,7 @@ pub unsafe fn handle_embed_message(
 
     match msg {
         embed_msg::IS_SUPPORTED => {
-            // param2 might contain context info for IS_SUPPORTED
-            // Let's check what we're getting
-            let available = embedded_editor.is_available();
-            nih_log!("[EMBED] IS_SUPPORTED: available={}, param1={:?}, param2={:?}", available, param1, param2);
-            if available {
+            if embedded_editor.is_available() {
                 1 // Available
             } else {
                 0 // Not supported
@@ -282,14 +277,11 @@ pub unsafe fn handle_embed_message(
         }
 
         embed_msg::CREATE => {
-            // param1 might contain context info - let's check
-            nih_log!("[EMBED] CREATE: param1={:?}, param2={:?}", param1, param2);
             embedded_editor.create();
             0
         }
 
         embed_msg::DESTROY => {
-            nih_log!("[EMBED] DESTROY: param1={:?}, param2={:?}", param1, param2);
             embedded_editor.destroy();
             0
         }
@@ -297,20 +289,14 @@ pub unsafe fn handle_embed_message(
         embed_msg::PAINT => {
             // param1 = REAPER_FXEMBED_IBitmap*, param2 = REAPER_FXEMBED_DrawInfo*
             if param1.is_null() || param2.is_null() {
-                nih_log!("[EMBED] PAINT: null pointer (param1={:?}, param2={:?})", param1, param2);
                 return 0;
             }
 
             let raw_bitmap = &*(param1 as *const RawBitmap);
             let raw_info = &*(param2 as *const RawEmbedDrawInfo);
 
-            // Debug: print raw DrawInfo fields
-            nih_log!("[EMBED] PAINT raw_info: context={}, dpi={}, w={}, h={}, flags={}", 
-                     raw_info.context, raw_info.dpi, raw_info.width, raw_info.height, raw_info.flags);
-
             // Validate vtable pointer before dereferencing
             if raw_bitmap.vtable.is_null() {
-                nih_log!("[EMBED] PAINT: bitmap vtable is null!");
                 return 0;
             }
 
@@ -337,12 +323,7 @@ pub unsafe fn handle_embed_message(
             // isFlipped is less critical, default to false if vtable is unreliable
             let flipped = false; // Safe default
 
-            nih_log!("[EMBED] PAINT: bits={:?}, w={}, h={}, span={} (from_bitmap={})", 
-                     bits_ptr, width, height, row_span, row_span_from_bitmap);
-
             if bits_ptr.is_null() || width <= 0 || height <= 0 || row_span <= 0 {
-                nih_log!("[EMBED] PAINT: invalid bitmap dimensions (w={}, h={}, span={})", 
-                         width, height, row_span);
                 return 0;
             }
 
@@ -380,7 +361,6 @@ pub unsafe fn handle_embed_message(
 
         embed_msg::GETMINMAXINFO => {
             if param2.is_null() {
-                nih_log!("[EMBED] GETMINMAXINFO: param2 is null");
                 return 0;
             }
             let raw_hints = &mut *(param2 as *mut RawEmbedSizeHints);
@@ -391,20 +371,12 @@ pub unsafe fn handle_embed_message(
                 1.0
             };
 
-            nih_log!("[EMBED] GETMINMAXINFO: context={:?}, dpi={}, flags={}", context, dpi, raw_hints.flags);
-
             match embedded_editor.size_hints(context, dpi) {
                 Some(hints) => {
-                    nih_log!("[EMBED] GETMINMAXINFO returning: min={}x{}, max={}x{}, aspect={}/{}", 
-                             hints.min_width, hints.min_height, hints.max_width, hints.max_height,
-                             hints.preferred_aspect, hints.minimum_aspect);
                     raw_hints.from_size_hints(&hints);
                     1 // Hints provided
                 }
-                None => {
-                    nih_log!("[EMBED] GETMINMAXINFO: no hints returned");
-                    0
-                }
+                None => 0,
             }
         }
 
@@ -440,21 +412,11 @@ pub unsafe fn handle_embed_message(
         }
 
         // NOBORDER - return 0 to use default border, return 1 to request no border
-        0x100001 => {
-            nih_log!("[EMBED] NOBORDER query");
-            0 // Use default border
-        }
+        0x100001 => 0,
 
         // HITTEST - return 1 if click should pass through
-        0x100002 => {
-            // param1 = original message (e.g., LBUTTONDOWN)
-            // param2 = DrawInfo
-            0 // Don't pass through clicks
-        }
+        0x100002 => 0,
 
-        _ => {
-            nih_log!("[EMBED] Unknown message: 0x{:x}, param1={:?}, param2={:?}", msg, param1, param2);
-            0
-        }
+        _ => 0
     }
 }

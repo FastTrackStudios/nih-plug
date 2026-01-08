@@ -1,0 +1,18 @@
+[package]
+name = "wgpu_reaper_demo"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cody Wright"]
+license = "ISC"
+description = "Demo plugin showcasing Dioxus rendering in windowed and REAPER embedded modes"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { path = "../../..", features = ["assert_process_allocs"] }
+# Note: embedded feature disabled for now due to DioxusDocument not being Send+Sync
+nih_plug_dioxus = { path = "../../../nih_plug_dioxus" }
+
+# For shared atomic state between audio and UI threads
+atomic_float = "1.0"
