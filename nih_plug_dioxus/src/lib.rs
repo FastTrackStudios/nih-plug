@@ -139,7 +139,11 @@ mod hot_reload;
 mod renderer;
 mod state;
 mod wgpu_state;
+#[cfg(feature = "softbuffer-blit")]
+mod wgpu_offscreen;
 mod window;
+#[cfg(feature = "softbuffer-blit")]
+mod window_softbuffer;
 
 pub use context::{ParamContext, use_param, use_param_context, use_param_normalized};
 pub use state::DioxusState;

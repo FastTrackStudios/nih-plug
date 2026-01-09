@@ -1,4 +1,11 @@
 //! Baseview window handler for Dioxus editors.
+//!
+//! This module provides the standard wgpu surface-based window handler.
+//! For Linux/XWayland compatibility, use the `softbuffer-blit` feature which
+//! renders with wgpu to an offscreen texture and blits via softbuffer.
+
+// This module is only used when softbuffer-blit is NOT enabled
+#![cfg(not(feature = "softbuffer-blit"))]
 
 use crate::SharedState;
 use crate::context::ParamContext;
@@ -98,14 +105,14 @@ impl document::Document for DocumentProxy {
     }
 }
 
-/// The baseview window handler for Dioxus editors.
+/// The baseview window handler for Dioxus editors using standard wgpu surface.
 pub struct DioxusWindowHandler {
     // Dioxus state
     dioxus_doc: Option<DioxusDocument>,
     app: fn() -> Element,
     animation_start: Instant,
 
-    // Rendering
+    // Rendering - standard wgpu surface mode
     wgpu_state: Option<WgpuState>,
     renderer: Option<Renderer>,
 
@@ -183,6 +190,11 @@ impl DioxusWindowHandler {
         // Get raw window handles using baseview's raw-window-handle 0.5 API
         // and convert them to raw-window-handle 0.6 types for wgpu
         let (window_handle, display_handle) = get_raw_handles_from_baseview(window);
+
+        // Debug: log what handles we got
+        nih_plug::nih_log!("[HANDLES] window: {:?}, display: {:?}",
+            window_handle.as_ref().map(|h| format!("{:?}", h)),
+            display_handle.as_ref().map(|h| format!("{:?}", h)));
 
         // Calculate initial physical size (will be corrected on first resize event)
         let physical_width = (logical_width as f32 * scale_factor) as u32;
@@ -622,91 +634,22 @@ impl ArcWake for RedrawWaker {
     }
 }
 
-/// Get raw window handles from baseview Window, converting from raw-window-handle 0.5
-/// to raw-window-handle 0.6 types.
+/// Get raw window handles from baseview Window using raw-window-handle 0.6 API.
 ///
-/// Baseview uses raw-window-handle 0.5 which has different types than 0.6.
-/// We need to manually extract the raw pointers and reconstruct them as 0.6 types.
+/// Our forked baseview uses raw-window-handle 0.6 directly, so we can just use
+/// the HasWindowHandle and HasDisplayHandle traits.
 fn get_raw_handles_from_baseview(
     window: &Window,
 ) -> (Option<RawWindowHandle>, Option<RawDisplayHandle>) {
-    // Use baseview's HasRawWindowHandle trait (0.5) to get the raw handles
-    use raw_window_handle_05::HasRawDisplayHandle as HasRawDisplayHandle05;
-    use raw_window_handle_05::HasRawWindowHandle as HasRawWindowHandle05;
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-    // Get the 0.5 raw handles
-    let window_handle_05 = window.raw_window_handle();
-    let display_handle_05 = window.raw_display_handle();
+    // Get the 0.6 handles directly from baseview
+    let window_handle = window.window_handle().ok().map(|h| h.as_raw());
+    let display_handle = window.display_handle().ok().map(|h| h.as_raw());
 
-    // Convert 0.5 types to 0.6 types by extracting the raw data
-    let window_handle_06 = convert_window_handle_05_to_06(window_handle_05);
-    let display_handle_06 = convert_display_handle_05_to_06(display_handle_05);
+    // Debug: log the raw handles
+    nih_plug::nih_log!("[RAW HANDLES] window: {:?}, display: {:?}",
+        window_handle, display_handle);
 
-    (window_handle_06, display_handle_06)
-}
-
-/// Convert a raw-window-handle 0.5 RawWindowHandle to 0.6
-fn convert_window_handle_05_to_06(
-    handle: raw_window_handle_05::RawWindowHandle,
-) -> Option<RawWindowHandle> {
-    use std::num::NonZeroIsize;
-    use std::ptr::NonNull;
-
-    match handle {
-        #[cfg(target_os = "macos")]
-        raw_window_handle_05::RawWindowHandle::AppKit(h) => {
-            let mut handle =
-                raw_window_handle::AppKitWindowHandle::new(NonNull::new(h.ns_view as *mut _)?);
-            Some(RawWindowHandle::AppKit(handle))
-        }
-        #[cfg(target_os = "windows")]
-        raw_window_handle_05::RawWindowHandle::Win32(h) => {
-            let handle =
-                raw_window_handle::Win32WindowHandle::new(NonZeroIsize::new(h.hwnd as isize)?);
-            Some(RawWindowHandle::Win32(handle))
-        }
-        #[cfg(target_os = "linux")]
-        raw_window_handle_05::RawWindowHandle::Xcb(h) => {
-            let handle =
-                raw_window_handle::XcbWindowHandle::new(NonZeroIsize::new(h.window as isize)?);
-            Some(RawWindowHandle::Xcb(handle))
-        }
-        #[cfg(target_os = "linux")]
-        raw_window_handle_05::RawWindowHandle::Xlib(h) => {
-            let handle = raw_window_handle::XlibWindowHandle::new(h.window as u32);
-            Some(RawWindowHandle::Xlib(handle))
-        }
-        _ => None,
-    }
-}
-
-/// Convert a raw-window-handle 0.5 RawDisplayHandle to 0.6
-fn convert_display_handle_05_to_06(
-    handle: raw_window_handle_05::RawDisplayHandle,
-) -> Option<RawDisplayHandle> {
-    use std::ptr::NonNull;
-
-    match handle {
-        #[cfg(target_os = "macos")]
-        raw_window_handle_05::RawDisplayHandle::AppKit(_) => Some(RawDisplayHandle::AppKit(
-            raw_window_handle::AppKitDisplayHandle::new(),
-        )),
-        #[cfg(target_os = "windows")]
-        raw_window_handle_05::RawDisplayHandle::Windows(_) => Some(RawDisplayHandle::Windows(
-            raw_window_handle::WindowsDisplayHandle::new(),
-        )),
-        #[cfg(target_os = "linux")]
-        raw_window_handle_05::RawDisplayHandle::Xcb(h) => {
-            let connection = NonNull::new(h.connection as *mut _);
-            let handle = raw_window_handle::XcbDisplayHandle::new(connection, h.screen);
-            Some(RawDisplayHandle::Xcb(handle))
-        }
-        #[cfg(target_os = "linux")]
-        raw_window_handle_05::RawDisplayHandle::Xlib(h) => {
-            let display = NonNull::new(h.display as *mut _);
-            let handle = raw_window_handle::XlibDisplayHandle::new(display, h.screen);
-            Some(RawDisplayHandle::Xlib(handle))
-        }
-        _ => None,
-    }
+    (window_handle, display_handle)
 }

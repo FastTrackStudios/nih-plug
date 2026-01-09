@@ -28,25 +28,26 @@ impl WgpuState {
         width: u32,
         height: u32,
     ) -> Self {
-        // Create the instance
+        // Create the instance - use Vulkan on Linux
+        #[cfg(target_os = "linux")]
+        let backends = wgpu::Backends::VULKAN;
+        #[cfg(not(target_os = "linux"))]
+        let backends = wgpu::Backends::all();
+
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
+            flags: wgpu::InstanceFlags::from_build_config(),
             ..Default::default()
         });
 
-        // Create a wrapper that provides the raw-window-handle 0.6 traits
-        let wrapper = RawHandleWrapper {
-            window: window_handle,
-            display: display_handle,
-        };
-
-        // Create the surface
+        // Create the surface using RawHandle directly (not from_window)
+        // This gives us more control over exactly what handles are passed
         let surface = unsafe {
             instance
-                .create_surface_unsafe(
-                    wgpu::SurfaceTargetUnsafe::from_window(&wrapper)
-                        .expect("Failed to create surface target"),
-                )
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: display_handle,
+                    raw_window_handle: window_handle,
+                })
                 .expect("Failed to create surface")
         };
 
@@ -83,24 +84,93 @@ impl WgpuState {
         // Note: This means CSS colors (which are specified in sRGB) need to be
         // converted to linear RGB by the rendering pipeline (Blitz/Vello).
         let surface_caps = surface.get_capabilities(&adapter);
+
+        // Debug: log adapter and surface capabilities
+        nih_plug::nih_log!("[WGPU] Adapter: {:?}", adapter.get_info());
+        nih_plug::nih_log!("[WGPU] Adapter supports surface: {}", adapter.is_surface_supported(&surface));
+        nih_plug::nih_log!("[WGPU] Surface formats: {:?}", surface_caps.formats);
+        nih_plug::nih_log!("[WGPU] Surface alpha modes: {:?}", surface_caps.alpha_modes);
+        nih_plug::nih_log!("[WGPU] Surface present modes: {:?}", surface_caps.present_modes);
+
+        if surface_caps.formats.is_empty() {
+            nih_plug::nih_error!("[WGPU] No surface formats available - surface may be invalid");
+        }
+
         let format = surface_caps
             .formats
             .iter()
             .find(|f| !f.is_srgb())
             .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            .unwrap_or_else(|| {
+                if surface_caps.formats.is_empty() {
+                    nih_plug::nih_error!("[WGPU] Using fallback format Bgra8Unorm");
+                    wgpu::TextureFormat::Bgra8Unorm
+                } else {
+                    surface_caps.formats[0]
+                }
+            });
+
+        // Prefer Inherit alpha mode for better compatibility, especially on XWayland
+        let alpha_mode = if surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Inherit) {
+            wgpu::CompositeAlphaMode::Inherit
+        } else if surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+            wgpu::CompositeAlphaMode::Opaque
+        } else {
+            surface_caps.alpha_modes[0]
+        };
+
+        // Use Fifo (vsync) for reliability
+        let present_mode = if surface_caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
+        } else {
+            surface_caps.present_modes[0]
+        };
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: width.max(1),
             height: height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: surface_caps.alpha_modes[0],
+            present_mode,
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
 
+        nih_plug::nih_log!("[WGPU] Configuring surface: {}x{}, format={:?}, alpha={:?}, present={:?}",
+            config.width, config.height, config.format, config.alpha_mode, config.present_mode);
+
+        // On Linux/XWayland, surface configuration can fail due to timing issues
+        // or XWayland compatibility problems. We'll try a few times with a small delay.
+        #[cfg(target_os = "linux")]
+        {
+            let mut attempts = 0;
+            const MAX_ATTEMPTS: u32 = 3;
+            loop {
+                // Try to configure - this pushes errors to the device's error scope
+                device.push_error_scope(wgpu::ErrorFilter::Validation);
+                surface.configure(&device, &config);
+
+                let error = device.pop_error_scope().block_on();
+                if error.is_none() {
+                    nih_plug::nih_log!("[WGPU] Surface configured successfully on attempt {}", attempts + 1);
+                    break;
+                }
+
+                attempts += 1;
+                if attempts >= MAX_ATTEMPTS {
+                    nih_plug::nih_error!("[WGPU] Surface configuration failed after {} attempts: {:?}", attempts, error);
+                    // Try one more time without error scope - let it panic if it still fails
+                    surface.configure(&device, &config);
+                    break;
+                }
+
+                nih_plug::nih_warn!("[WGPU] Surface configuration attempt {} failed, retrying...", attempts);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
         surface.configure(&device, &config);
 
         Self {

@@ -2,7 +2,10 @@
 
 use crate::SharedState;
 use crate::state::DioxusState;
+#[cfg(not(feature = "softbuffer-blit"))]
 use crate::window::DioxusWindowHandler;
+#[cfg(feature = "softbuffer-blit")]
+use crate::window_softbuffer::DioxusSoftbufferWindowHandler;
 use baseview::{Size, WindowHandle, WindowOpenOptions, WindowScalePolicy};
 use crossbeam::atomic::AtomicCell;
 use dioxus_native::prelude::Element;
@@ -84,14 +87,28 @@ impl Editor for DioxusEditor {
                     .unwrap_or(WindowScalePolicy::SystemScaleFactor),
             },
             move |window| {
-                DioxusWindowHandler::new_with_state(
-                    window,
-                    app,
-                    gui_context.clone(),
-                    dioxus_state.clone(),
-                    needs_redraw.clone(),
-                    shared_state,
-                )
+                #[cfg(feature = "softbuffer-blit")]
+                {
+                    DioxusSoftbufferWindowHandler::new_with_state(
+                        window,
+                        app,
+                        gui_context.clone(),
+                        dioxus_state.clone(),
+                        needs_redraw.clone(),
+                        shared_state,
+                    )
+                }
+                #[cfg(not(feature = "softbuffer-blit"))]
+                {
+                    DioxusWindowHandler::new_with_state(
+                        window,
+                        app,
+                        gui_context.clone(),
+                        dioxus_state.clone(),
+                        needs_redraw.clone(),
+                        shared_state,
+                    )
+                }
             },
         );
 
@@ -144,50 +161,62 @@ impl Drop for DioxusEditorHandle {
     }
 }
 
-/// Adapter to convert nih_plug's `ParentWindowHandle` to raw-window-handle 0.5 traits
-/// (which is what baseview expects).
+/// Adapter to convert nih_plug's `ParentWindowHandle` to raw-window-handle 0.6 traits
+/// (which is what baseview expects with the upgrade_rwh branch).
 struct RwhAdapter(ParentWindowHandle);
 
-// Implement raw-window-handle 0.5 traits for baseview compatibility
-unsafe impl raw_window_handle_05::HasRawWindowHandle for RwhAdapter {
-    fn raw_window_handle(&self) -> raw_window_handle_05::RawWindowHandle {
-        match self.0 {
+impl raw_window_handle::HasWindowHandle for RwhAdapter {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        use raw_window_handle::RawWindowHandle;
+        use std::num::{NonZeroIsize, NonZeroU32};
+        use std::ptr::NonNull;
+
+        let raw = match self.0 {
             ParentWindowHandle::X11Window(window) => {
-                let mut handle = raw_window_handle_05::XcbWindowHandle::empty();
-                handle.window = window as u32;
-                raw_window_handle_05::RawWindowHandle::Xcb(handle)
+                let handle = raw_window_handle::XcbWindowHandle::new(
+                    NonZeroU32::new(window as u32).expect("X11 window ID should not be 0"),
+                );
+                RawWindowHandle::Xcb(handle)
             }
             ParentWindowHandle::AppKitNsView(ns_view) => {
-                let mut handle = raw_window_handle_05::AppKitWindowHandle::empty();
-                handle.ns_view = ns_view;
-                raw_window_handle_05::RawWindowHandle::AppKit(handle)
+                let handle = raw_window_handle::AppKitWindowHandle::new(
+                    NonNull::new(ns_view).expect("NSView should not be null"),
+                );
+                RawWindowHandle::AppKit(handle)
             }
             ParentWindowHandle::Win32Hwnd(hwnd) => {
-                let mut handle = raw_window_handle_05::Win32WindowHandle::empty();
-                handle.hwnd = hwnd;
-                raw_window_handle_05::RawWindowHandle::Win32(handle)
+                let handle = raw_window_handle::Win32WindowHandle::new(
+                    NonZeroIsize::new(hwnd as isize).expect("HWND should not be 0"),
+                );
+                RawWindowHandle::Win32(handle)
             }
-        }
+        };
+        // Safety: The handle is valid for the lifetime of the adapter
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
     }
 }
 
-unsafe impl raw_window_handle_05::HasRawDisplayHandle for RwhAdapter {
-    fn raw_display_handle(&self) -> raw_window_handle_05::RawDisplayHandle {
-        match self.0 {
+impl raw_window_handle::HasDisplayHandle for RwhAdapter {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        use raw_window_handle::RawDisplayHandle;
+
+        let raw = match self.0 {
             ParentWindowHandle::X11Window(_) => {
                 // For X11, we need a display connection, but we don't have one
                 // from the parent handle. Use an empty XCB display handle.
-                let handle = raw_window_handle_05::XcbDisplayHandle::empty();
-                raw_window_handle_05::RawDisplayHandle::Xcb(handle)
+                let handle = raw_window_handle::XcbDisplayHandle::new(None, 0);
+                RawDisplayHandle::Xcb(handle)
             }
             ParentWindowHandle::AppKitNsView(_) => {
-                let handle = raw_window_handle_05::AppKitDisplayHandle::empty();
-                raw_window_handle_05::RawDisplayHandle::AppKit(handle)
+                let handle = raw_window_handle::AppKitDisplayHandle::new();
+                RawDisplayHandle::AppKit(handle)
             }
             ParentWindowHandle::Win32Hwnd(_) => {
-                let handle = raw_window_handle_05::WindowsDisplayHandle::empty();
-                raw_window_handle_05::RawDisplayHandle::Windows(handle)
+                let handle = raw_window_handle::WindowsDisplayHandle::new();
+                RawDisplayHandle::Windows(handle)
             }
-        }
+        };
+        // Safety: The handle is valid for the lifetime of the adapter
+        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw) })
     }
 }

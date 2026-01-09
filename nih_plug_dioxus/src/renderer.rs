@@ -1,6 +1,8 @@
 //! Vello renderer integration.
 
 use crate::wgpu_state::WgpuState;
+#[cfg(feature = "softbuffer-blit")]
+use crate::wgpu_offscreen::WgpuOffscreenState;
 use anyrender_vello::VelloScenePainter;
 use blitz_dom::Document as _;
 use blitz_paint::paint_scene;
@@ -163,5 +165,61 @@ impl Renderer {
 
         wgpu_state.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+    }
+
+    /// Render the document to an offscreen texture (for softbuffer blit).
+    #[cfg(feature = "softbuffer-blit")]
+    pub fn render_offscreen(
+        &mut self,
+        wgpu_state: &WgpuOffscreenState,
+        doc: &DioxusDocument,
+        scale: f32,
+        width: u32,
+        height: u32,
+    ) {
+        // Ensure we have the right sized intermediate texture
+        self.ensure_target(&wgpu_state.device, wgpu_state.format(), width, height);
+
+        let target_view = self.target_view.as_ref().expect("Target view not created");
+        let blitter = self.blitter.as_ref().expect("Blitter not created");
+
+        // Clear and paint the scene
+        self.scene.reset();
+        paint_scene(
+            &mut VelloScenePainter::new(&mut self.scene),
+            &*doc.inner(),
+            scale as f64,
+            width,
+            height,
+        );
+
+        // Render to the intermediate texture (using linear view for Vello compute shader)
+        self.vello_renderer
+            .render_to_texture(
+                &wgpu_state.device,
+                &wgpu_state.queue,
+                &self.scene,
+                target_view,
+                &RenderParams {
+                    // Transparent background - let CSS provide the actual background color
+                    base_color: AlphaColor::TRANSPARENT,
+                    width,
+                    height,
+                    antialiasing_method: vello::AaConfig::Msaa16,
+                },
+            )
+            .expect("Failed to render");
+
+        // Blit from intermediate texture to offscreen render texture
+        let mut encoder =
+            wgpu_state
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("offscreen blit encoder"),
+                });
+
+        blitter.copy(&wgpu_state.device, &mut encoder, target_view, &wgpu_state.render_texture_view);
+
+        wgpu_state.queue.submit(std::iter::once(encoder.finish()));
     }
 }
