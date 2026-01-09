@@ -15,16 +15,13 @@ embedded = ["dep:anyrender_vello_cpu", "dep:anyrender"]
 [dependencies]
 nih_plug = { path = "..", default-features = false }
 
-# Dioxus core
-dioxus = { version = "0.7", default-features = false, features = ["html", "hooks", "signals", "macro"] }
+# Use dioxus-native from blitz repo which includes all the rendering + re-exports dioxus core
+dioxus-native = { git = "https://github.com/DioxusLabs/blitz.git", features = ["prelude"] }
 
-# Dioxus Native DOM (from crates.io)
-dioxus-native-dom = "0.7"
-
-# Blitz (from crates.io)
-blitz-dom = "0.2"
-blitz-paint = "0.2"
-blitz-traits = "0.2"
+# Blitz crates from git for latest CSS support
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz.git" }
+blitz-paint = { git = "https://github.com/DioxusLabs/blitz.git" }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz.git" }
 
 # Rendering
 anyrender_vello = "0.6"

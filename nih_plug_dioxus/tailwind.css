@@ -3,7 +3,17 @@
 /* Source paths for class detection */
 @source "./src/**/*.{rs,html,css}";
 @source "./examples/**/*.{rs,html,css}";
-@source "../../lumen-blocks/blocks/src/**/*.{rs,html,css}";
+
+/* Lumen-blocks from cargo cache - scan for all Tailwind classes used */
+@source "/Users/codywright/.cargo/git/checkouts/lumen-blocks-5600ca768664ebbd/2675507/blocks/src/**/*.{rs,html,css}";
+
+/* FastTrackStudio module paths (relative from libs/nih-plug/nih_plug_dioxus/) */
+@source "../../../modules/fts-plugin-core/src/**/*.{rs,html,css}";
+@source "../../../modules/plugins/ui/src/**/*.{rs,html,css}";
+@source "../../../modules/plugins/gain/src/**/*.{rs,html,css}";
+@source "../../../apps/plugins/gain/src/**/*.{rs,html,css}";
+@source "../../../apps/plugins/spectrum_analyzer/src/**/*.{rs,html,css}";
+@source "../../../apps/plugins/wgpu_reaper_demo/src/**/*.{rs,html,css}";
 
 /* Base body styles */
 body {

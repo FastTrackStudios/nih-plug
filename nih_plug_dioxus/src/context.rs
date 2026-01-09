@@ -1,9 +1,9 @@
 //! Parameter context for Dioxus components.
 
-use dioxus::prelude::*;
+use dioxus_native::prelude::*;
 use nih_plug::prelude::{GuiContext, Param, ParamPtr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Context for interacting with plugin parameters from Dioxus components.
 ///

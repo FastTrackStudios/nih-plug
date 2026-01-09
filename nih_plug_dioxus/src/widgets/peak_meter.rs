@@ -1,6 +1,6 @@
 //! Peak meter widget.
 
-use dioxus::prelude::*;
+use dioxus_native::prelude::*;
 use std::time::Duration;
 
 /// Props for the PeakMeter component.

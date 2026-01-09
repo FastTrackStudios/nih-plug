@@ -48,6 +48,8 @@ fn main() {
         match status {
             Ok(s) if s.success() => {
                 println!("cargo:warning=Tailwind CSS compiled successfully");
+                // Post-process to remove @layer wrappers (Blitz/Stylo doesn't fully support them)
+                strip_css_layers(&output_css);
             }
             Ok(s) => {
                 println!(
@@ -151,6 +153,81 @@ fn binary_suffix() -> &'static str {
     return ".exe";
     #[cfg(not(windows))]
     return "";
+}
+
+/// Strip @layer wrappers from CSS since Blitz/Stylo doesn't fully support them.
+/// This converts `@layer foo { .class { ... } }` to just `.class { ... }`
+fn strip_css_layers(css_path: &Path) {
+    let Ok(css) = fs::read_to_string(css_path) else {
+        return;
+    };
+
+    let mut result = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    let mut in_layer = false;
+    let mut brace_depth = 0;
+
+    while let Some(c) = chars.next() {
+        // Check for @layer
+        if c == '@' {
+            // Peek ahead to see if it's @layer
+            let mut peek_str = String::new();
+            let mut temp_chars = chars.clone();
+            for _ in 0..5 {
+                if let Some(pc) = temp_chars.next() {
+                    peek_str.push(pc);
+                }
+            }
+
+            if peek_str.starts_with("layer") {
+                // Skip @layer and its name until we hit '{'
+                for _ in 0..5 {
+                    chars.next(); // consume "layer"
+                }
+                // Skip whitespace and layer name until '{'
+                while let Some(&nc) = chars.peek() {
+                    if nc == '{' {
+                        chars.next(); // consume the '{'
+                        in_layer = true;
+                        brace_depth = 1;
+                        break;
+                    } else if nc == ';' {
+                        // @layer declaration without block (e.g., @layer properties;)
+                        chars.next();
+                        break;
+                    }
+                    chars.next();
+                }
+                continue;
+            }
+        }
+
+        if in_layer {
+            if c == '{' {
+                brace_depth += 1;
+                result.push(c);
+            } else if c == '}' {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    // End of @layer block, don't output the closing brace
+                    in_layer = false;
+                } else {
+                    result.push(c);
+                }
+            } else {
+                result.push(c);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    // Write the processed CSS back
+    if let Err(e) = fs::write(css_path, result) {
+        println!("cargo:warning=Failed to write processed CSS: {}", e);
+    } else {
+        println!("cargo:warning=Stripped @layer wrappers from CSS for Blitz compatibility");
+    }
 }
 
 /// Use fallback CSS when Tailwind CLI is not available

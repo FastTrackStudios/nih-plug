@@ -65,13 +65,63 @@
 
 #![allow(clippy::type_complexity)]
 
+use std::any::Any;
 use std::sync::Arc;
 
-use dioxus::prelude::Element;
+use dioxus_native::prelude::Element;
 use nih_plug::prelude::Editor;
 
-// Re-export dioxus for convenience
-pub use dioxus;
+// Re-export dioxus_native for convenience
+pub use dioxus_native;
+
+// Re-export individual dioxus crates for more specific imports
+pub use dioxus_native::prelude::dioxus_core;
+pub use dioxus_native::prelude::dioxus_elements;
+pub use dioxus_native::prelude::dioxus_signals;
+pub use dioxus_native::prelude::document;
+
+/// A type-erased wrapper for shared UI state.
+///
+/// This allows the framework to store arbitrary state types while preserving
+/// the ability to downcast them in components.
+///
+/// # Usage in components
+///
+/// ```ignore
+/// use nih_plug_dioxus::prelude::*;
+///
+/// #[component]
+/// fn App() -> Element {
+///     // Get the wrapper from context
+///     let shared = use_context::<SharedState>();
+///     // Downcast to your concrete type
+///     let ui_state = shared.get::<MyUiState>().expect("MyUiState not in context");
+///     // ...
+/// }
+/// ```
+#[derive(Clone)]
+pub struct SharedState {
+    inner: Arc<dyn Any + Send + Sync>,
+}
+
+impl SharedState {
+    /// Create a new SharedState wrapper around the given value.
+    pub fn new<T: Any + Send + Sync + 'static>(value: Arc<T>) -> Self {
+        Self { inner: value }
+    }
+
+    /// Try to downcast to the concrete type.
+    /// Returns the Arc<T> if the type matches, None otherwise.
+    pub fn get<T: Any + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        // Clone the Arc and try to downcast it
+        self.inner.clone().downcast::<T>().ok()
+    }
+
+    /// Try to get a reference to the inner value.
+    pub fn get_ref<T: Any + Send + Sync + 'static>(&self) -> Option<&T> {
+        self.inner.downcast_ref::<T>()
+    }
+}
 
 // Public modules
 pub mod assets;
@@ -91,7 +141,7 @@ mod state;
 mod wgpu_state;
 mod window;
 
-pub use context::{use_param, use_param_context, use_param_normalized, ParamContext};
+pub use context::{ParamContext, use_param, use_param_context, use_param_normalized};
 pub use state::DioxusState;
 
 /// Compiled Tailwind CSS with shadcn/lumen-blocks theme variables.
@@ -124,16 +174,20 @@ pub const THEME_CSS: &str = TAILWIND_CSS;
 
 /// Prelude module for convenient imports
 pub mod prelude {
-    pub use crate::context::{use_param, use_param_context, use_param_normalized, ParamContext};
+    pub use crate::SharedState;
+    pub use crate::TAILWIND_CSS;
+    pub use crate::THEME_CSS;
+    pub use crate::context::{ParamContext, use_param, use_param_context, use_param_normalized};
     pub use crate::create_dioxus_editor;
-    pub use crate::custom_paint::{use_wgpu, CustomPaintCtx, CustomPaintSource, DeviceHandle, TextureHandle};
+    pub use crate::create_dioxus_editor_with_state;
+    pub use crate::custom_paint::{
+        CustomPaintCtx, CustomPaintSource, DeviceHandle, TextureHandle, use_wgpu,
+    };
     #[cfg(feature = "embedded")]
     pub use crate::embedded::DioxusEmbeddedEditor;
     pub use crate::state::DioxusState;
     pub use crate::widgets::*;
-    pub use crate::TAILWIND_CSS;
-    pub use crate::THEME_CSS;
-    pub use dioxus::prelude::*;
+    pub use dioxus_native::prelude::*;
 }
 
 /// Create a Dioxus-based editor for a NIH-plug plugin.
@@ -175,4 +229,57 @@ pub fn create_dioxus_editor(
     app: fn() -> Element,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(editor::DioxusEditor::new(state, app)))
+}
+
+/// Create a Dioxus-based editor with shared state for a NIH-plug plugin.
+///
+/// This allows the windowed editor to share state with the embedded editor.
+/// The shared state will be available via `use_context::<Arc<T>>()` in components.
+///
+/// # Arguments
+///
+/// * `state` - The editor state, which tracks window size and open status
+/// * `shared_state` - Shared state to inject into the Dioxus context
+/// * `app` - The Dioxus component function that renders the UI (must be `fn() -> Element`)
+///
+/// # Example
+///
+/// ```ignore
+/// use nih_plug_dioxus::prelude::*;
+/// use std::sync::atomic::{AtomicI32, Ordering};
+///
+/// #[derive(Clone)]
+/// pub struct SharedUiState {
+///     pub counter: Arc<AtomicI32>,
+/// }
+///
+/// fn create_editor(
+///     params: Arc<MyParams>,
+///     state: Arc<DioxusState>,
+///     ui_state: Arc<SharedUiState>,
+/// ) -> Option<Box<dyn Editor>> {
+///     create_dioxus_editor_with_state(state, ui_state, App)
+/// }
+///
+/// #[component]
+/// fn App() -> Element {
+///     let ui_state = use_context::<Arc<SharedUiState>>();
+///     let counter = ui_state.counter.load(Ordering::Relaxed);
+///     
+///     rsx! {
+///         div {
+///             h1 { "Counter: {counter}" }
+///         }
+///     }
+/// }
+/// ```
+pub fn create_dioxus_editor_with_state<T: std::any::Any + Send + Sync + 'static>(
+    state: Arc<DioxusState>,
+    shared_state: Arc<T>,
+    app: fn() -> Element,
+) -> Option<Box<dyn Editor>> {
+    let wrapped = SharedState::new(shared_state);
+    Some(Box::new(editor::DioxusEditor::new_with_state(
+        state, wrapped, app,
+    )))
 }

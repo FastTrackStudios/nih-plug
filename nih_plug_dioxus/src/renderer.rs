@@ -2,10 +2,11 @@
 
 use crate::wgpu_state::WgpuState;
 use anyrender_vello::VelloScenePainter;
+use blitz_dom::Document as _;
 use blitz_paint::paint_scene;
-use dioxus_native_dom::DioxusDocument;
+use dioxus_native::DioxusDocument;
 use vello::{
-    peniko::color::AlphaColor, RenderParams, Renderer as VelloRenderer, RendererOptions, Scene,
+    RenderParams, Renderer as VelloRenderer, RendererOptions, Scene, peniko::color::AlphaColor,
 };
 use wgpu::util::TextureBlitter;
 
@@ -13,8 +14,9 @@ use wgpu::util::TextureBlitter;
 pub struct Renderer {
     vello_renderer: VelloRenderer,
     scene: Scene,
-    // Intermediate texture for rendering (vello uses compute shaders)
+    // Intermediate texture for Vello rendering (compute shader output, must be Rgba8Unorm)
     target_texture: Option<wgpu::Texture>,
+    /// View for Vello to render into (linear Rgba8Unorm for compute shader)
     target_view: Option<wgpu::TextureView>,
     blitter: Option<TextureBlitter>,
     last_width: u32,
@@ -56,6 +58,8 @@ impl Renderer {
     ) {
         if self.last_width != width || self.last_height != height || self.target_texture.is_none() {
             // Create intermediate texture for vello (compute shader output)
+            // Vello requires Rgba8Unorm with STORAGE_BINDING for its compute shaders.
+            // The blitter will handle any necessary format conversion when copying to the surface.
             let target_texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("vello target"),
                 size: wgpu::Extent3d {
@@ -70,9 +74,14 @@ impl Renderer {
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 view_formats: &[],
             });
+
+            // View for Vello to render into (must be linear Rgba8Unorm for compute shader)
             let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Create blitter to copy from intermediate to surface
+            // Note: TextureBlitter does a simple copy without gamma correction.
+            // Since we're using a non-sRGB surface format (selected in wgpu_state.rs),
+            // the colors will be interpreted as linear, which matches Vello's output.
             let blitter = TextureBlitter::new(device, surface_format);
 
             self.target_texture = Some(target_texture);
@@ -115,13 +124,13 @@ impl Renderer {
         self.scene.reset();
         paint_scene(
             &mut VelloScenePainter::new(&mut self.scene),
-            doc,
+            &*doc.inner(),
             scale as f64,
             width,
             height,
         );
 
-        // Render to the intermediate texture
+        // Render to the intermediate texture (using linear view for Vello compute shader)
         self.vello_renderer
             .render_to_texture(
                 &wgpu_state.device,
@@ -129,7 +138,8 @@ impl Renderer {
                 &self.scene,
                 target_view,
                 &RenderParams {
-                    base_color: AlphaColor::new([0.1, 0.1, 0.1, 1.0]), // Dark background
+                    // Transparent background - let CSS provide the actual background color
+                    base_color: AlphaColor::TRANSPARENT,
                     width,
                     height,
                     antialiasing_method: vello::AaConfig::Msaa16,

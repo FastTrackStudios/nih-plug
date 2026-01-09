@@ -40,8 +40,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use dioxus::prelude::*;
-use dioxus_core::use_hook_with_cleanup;
+use dioxus_native::prelude::dioxus_core::use_hook_with_cleanup;
+use dioxus_native::prelude::*;
 
 // Re-export types from anyrender_vello for users implementing CustomPaintSource
 pub use anyrender_vello::{CustomPaintCtx, CustomPaintSource, TextureHandle};
@@ -134,11 +134,16 @@ impl DioxusRenderer {
     /// Unregister a custom paint source by ID.
     pub fn unregister_custom_paint_source(&self, id: u64) {
         let mut inner = self.inner.borrow_mut();
-        inner.paint_sources.retain(|(source_id, _)| *source_id != id);
+        inner
+            .paint_sources
+            .retain(|(source_id, _)| *source_id != id);
     }
 
     /// Get a mutable reference to a paint source by ID.
-    pub fn get_paint_source_mut(&self, id: u64) -> Option<impl std::ops::DerefMut<Target = dyn CustomPaintSource> + '_> {
+    pub fn get_paint_source_mut(
+        &self,
+        id: u64,
+    ) -> Option<impl std::ops::DerefMut<Target = dyn CustomPaintSource> + '_> {
         let inner = self.inner.borrow_mut();
         // This is a bit awkward because we need to return a guard that holds the borrow
         // For now, we'll use a different approach in the actual renderer

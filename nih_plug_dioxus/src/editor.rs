@@ -1,14 +1,15 @@
 //! The [`Editor`] trait implementation for Dioxus editors.
 
+use crate::SharedState;
 use crate::state::DioxusState;
 use crate::window::DioxusWindowHandler;
 use baseview::{Size, WindowHandle, WindowOpenOptions, WindowScalePolicy};
 use crossbeam::atomic::AtomicCell;
-use dioxus::prelude::Element;
+use dioxus_native::prelude::Element;
 use nih_plug::prelude::{Editor, GuiContext, ParentWindowHandle};
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// An [`Editor`] implementation that renders a Dioxus UI using the Blitz/Vello renderer.
 pub struct DioxusEditor {
@@ -16,6 +17,9 @@ pub struct DioxusEditor {
     pub(crate) app: fn() -> Element,
     pub(crate) scaling_factor: AtomicCell<Option<f32>>,
     pub(crate) needs_redraw: Arc<AtomicBool>,
+    /// Optional shared state to inject into Dioxus context.
+    /// This allows windowed and embedded editors to share state.
+    pub(crate) shared_state: Option<SharedState>,
 }
 
 impl DioxusEditor {
@@ -29,6 +33,28 @@ impl DioxusEditor {
             #[cfg(not(target_os = "macos"))]
             scaling_factor: AtomicCell::new(Some(1.0)),
             needs_redraw: Arc::new(AtomicBool::new(false)),
+            shared_state: None,
+        }
+    }
+
+    /// Create a new editor with shared state that will be injected into Dioxus context.
+    ///
+    /// The shared state will be available via `use_context::<SharedState>()` in components,
+    /// which can then be downcast to your concrete type using `shared_state.get::<T>()`.
+    pub fn new_with_state(
+        state: Arc<DioxusState>,
+        shared_state: SharedState,
+        app: fn() -> Element,
+    ) -> Self {
+        Self {
+            state,
+            app,
+            #[cfg(target_os = "macos")]
+            scaling_factor: AtomicCell::new(None),
+            #[cfg(not(target_os = "macos"))]
+            scaling_factor: AtomicCell::new(Some(1.0)),
+            needs_redraw: Arc::new(AtomicBool::new(false)),
+            shared_state: Some(shared_state),
         }
     }
 }
@@ -46,6 +72,7 @@ impl Editor for DioxusEditor {
         let gui_context = context.clone();
         let dioxus_state = self.state.clone();
         let needs_redraw = self.needs_redraw.clone();
+        let shared_state = self.shared_state.clone();
 
         let window = baseview::Window::open_parented(
             &RwhAdapter(parent),
@@ -57,12 +84,13 @@ impl Editor for DioxusEditor {
                     .unwrap_or(WindowScalePolicy::SystemScaleFactor),
             },
             move |window| {
-                DioxusWindowHandler::new(
+                DioxusWindowHandler::new_with_state(
                     window,
                     app,
                     gui_context.clone(),
                     dioxus_state.clone(),
                     needs_redraw.clone(),
+                    shared_state,
                 )
             },
         );

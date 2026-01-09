@@ -22,6 +22,7 @@
 //! }
 //! ```
 
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -31,18 +32,19 @@ use anyrender::ImageRenderer;
 use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::{Document, DocumentConfig};
 use blitz_traits::shell::{ColorScheme, Viewport};
-use crossbeam::channel::{bounded, Receiver, Sender};
-use dioxus::prelude::*;
-use dioxus_native_dom::DioxusDocument;
+use crossbeam::channel::{Receiver, Sender, bounded};
+use dioxus_native::DioxusDocument;
+use dioxus_native::prelude::*;
 use nih_plug::editor::embedded::{
     EmbedBitmap, EmbedContext, EmbedDrawInfo, EmbedMouseEvent, EmbedSizeHints, EmbeddedEditor,
     embed_flags,
 };
 
+use crate::SharedState;
 use crate::state::DioxusState;
 
 /// Commands sent to the render thread.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum RenderCommand {
     /// Request a render at the specified size.
     Render { width: u32, height: u32, scale: f32 },
@@ -118,6 +120,43 @@ impl DioxusEmbeddedEditor {
     /// * `_state` - Shared state with the windowed editor (for future use)
     /// * `app` - The Dioxus component function to render
     pub fn new(_state: Arc<DioxusState>, app: fn() -> Element) -> Self {
+        Self::new_internal(app, None)
+    }
+
+    /// Create a new embedded editor with shared state.
+    ///
+    /// This allows the embedded editor to share state with the windowed editor.
+    /// The shared state will be available via `use_context::<SharedState>()` in components,
+    /// which can then be downcast using `shared_state.get::<T>()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `_state` - Editor state (window size, etc.)
+    /// * `shared_state` - Shared UI state to inject into Dioxus context
+    /// * `app` - The Dioxus component function to render
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn embedded_editor(&mut self) -> Option<Arc<dyn EmbeddedEditor>> {
+    ///     Some(Arc::new(DioxusEmbeddedEditor::new_with_state(
+    ///         self.params.editor_state.clone(),
+    ///         self.ui_state.clone(),
+    ///         App,
+    ///     )))
+    /// }
+    /// ```
+    pub fn new_with_state<T: Any + Send + Sync + 'static>(
+        _state: Arc<DioxusState>,
+        shared_state: Arc<T>,
+        app: fn() -> Element,
+    ) -> Self {
+        let wrapped = SharedState::new(shared_state);
+        Self::new_internal(app, Some(wrapped))
+    }
+
+    /// Internal constructor that handles both with and without shared state.
+    fn new_internal(app: fn() -> Element, shared_state: Option<SharedState>) -> Self {
         // Create channels for communication
         // Larger buffer to handle bursts of mouse events
         let (command_tx, command_rx) = bounded::<RenderCommand>(16);
@@ -127,7 +166,7 @@ impl DioxusEmbeddedEditor {
         let render_thread = thread::Builder::new()
             .name("dioxus-embed-render".to_string())
             .spawn(move || {
-                Self::render_thread_main(command_rx, frame_tx, app);
+                Self::render_thread_main(command_rx, frame_tx, app, shared_state);
             })
             .expect("Failed to spawn render thread");
 
@@ -149,192 +188,276 @@ impl DioxusEmbeddedEditor {
         command_rx: Receiver<RenderCommand>,
         frame_tx: Sender<RenderedFrame>,
         app: fn() -> Element,
+        shared_state: Option<SharedState>,
     ) {
-        use blitz_traits::events::{BlitzMouseButtonEvent, MouseEventButton, MouseEventButtons, UiEvent};
-        use dioxus::prelude::Modifiers;
-        
+        use blitz_traits::events::{
+            BlitzMouseButtonEvent, MouseEventButton, MouseEventButtons, UiEvent,
+        };
+        use dioxus_native::prelude::Modifiers;
+
         let mut doc: Option<DioxusDocument> = None;
         let mut renderer: Option<VelloCpuImageRenderer> = None;
         let mut last_size: (u32, u32) = (0, 0);
         let mut mouse_buttons = MouseEventButtons::empty();
         let start_time = Instant::now();
 
+        // Clone shared_state for use in document initialization
+        let shared_state_for_init = shared_state.clone();
+
         nih_plug::nih_log!("Dioxus embedded render thread started");
 
-        while let Ok(cmd) = command_rx.recv() {
-            match cmd {
-                RenderCommand::Render {
-                    width,
-                    height,
-                    scale,
-                } => {
-                    if width == 0 || height == 0 {
-                        continue;
-                    }
+        // Track the last scale for re-renders
+        let mut last_scale: f32 = 1.0;
 
-                    // Initialize document on first render
-                    if doc.is_none() {
-                        nih_plug::nih_log!(
-                            "Initializing DioxusDocument for embedded UI ({}x{})",
-                            width,
-                            height
-                        );
+        // Poll interval for async tasks (~60fps)
+        let poll_interval = std::time::Duration::from_millis(16);
 
-                        let vdom = VirtualDom::new(app);
-                        let viewport = Viewport::new(width, height, scale, ColorScheme::Dark);
-                        let mut d = DioxusDocument::new(
-                            vdom,
-                            DocumentConfig {
-                                viewport: Some(viewport),
-                                ..Default::default()
-                            },
-                        );
-                        d.initial_build();
-                        doc = Some(d);
-                    }
+        loop {
+            // Use recv_timeout so we can periodically poll the vdom for async updates
+            let cmd = match command_rx.recv_timeout(poll_interval) {
+                Ok(cmd) => Some(cmd),
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => None,
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+            };
 
-                    // Update or create renderer if size changed
-                    if last_size != (width, height) {
-                        nih_plug::nih_log!("Resizing embedded renderer to {}x{}", width, height);
-                        renderer = Some(VelloCpuImageRenderer::new(width, height));
-                        last_size = (width, height);
-
-                        // Update document viewport
-                        if let Some(d) = doc.as_mut() {
-                            d.set_viewport(Viewport::new(width, height, scale, ColorScheme::Dark));
-                        }
-                    }
-
-                    let Some(d) = doc.as_mut() else {
-                        continue;
-                    };
-                    let Some(r) = renderer.as_mut() else {
-                        continue;
-                    };
-
-                    // Resolve layout with animation time
-                    let animation_time = start_time.elapsed().as_secs_f64();
-                    d.resolve(animation_time);
-
-                    // Render to buffer
-                    let mut buffer = vec![0u8; (width * height * 4) as usize];
-                    r.render_to_vec(
-                        |scene| {
-                            blitz_paint::paint_scene(
-                                scene,
-                                d,
-                                scale as f64,
-                                width,
-                                height,
-                            );
-                        },
-                        &mut buffer,
-                    );
-
-                    // Send frame (drop if receiver is full - we'll render another)
-                    let _ = frame_tx.try_send(RenderedFrame {
-                        buffer,
+            // Handle command if we got one
+            if let Some(cmd) = cmd {
+                match cmd {
+                    RenderCommand::Render {
                         width,
                         height,
-                    });
-                }
-                RenderCommand::MouseEvent {
-                    event_type,
-                    x,
-                    y,
-                    width,
-                    height,
-                    scale,
-                } => {
-                    nih_plug::nih_log!("[EMBED] MouseEvent: {:?} at ({}, {})", event_type, x, y);
-                    
-                    // Ensure document exists
-                    if doc.is_none() {
-                        let vdom = VirtualDom::new(app);
-                        let viewport = Viewport::new(width, height, scale, ColorScheme::Dark);
-                        let mut d = DioxusDocument::new(
-                            vdom,
-                            DocumentConfig {
-                                viewport: Some(viewport),
-                                ..Default::default()
-                            },
-                        );
-                        d.initial_build();
-                        doc = Some(d);
-                        renderer = Some(VelloCpuImageRenderer::new(width, height));
-                        last_size = (width, height);
-                    }
-                    
-                    if let Some(d) = doc.as_mut() {
-                        // Create blitz mouse event using the same types as events.rs
-                        let mods = Modifiers::empty();
-                        
-                        let ui_event = match event_type {
-                            MouseEventType::Move => {
-                                UiEvent::MouseMove(BlitzMouseButtonEvent {
-                                    x,
-                                    y,
-                                    button: MouseEventButton::Main,
-                                    buttons: mouse_buttons,
-                                    mods,
-                                })
-                            }
-                            MouseEventType::Down => {
-                                mouse_buttons |= MouseEventButtons::from(MouseEventButton::Main);
-                                UiEvent::MouseDown(BlitzMouseButtonEvent {
-                                    x,
-                                    y,
-                                    button: MouseEventButton::Main,
-                                    buttons: mouse_buttons,
-                                    mods,
-                                })
-                            }
-                            MouseEventType::Up => {
-                                mouse_buttons &= !MouseEventButtons::from(MouseEventButton::Main);
-                                UiEvent::MouseUp(BlitzMouseButtonEvent {
-                                    x,
-                                    y,
-                                    button: MouseEventButton::Main,
-                                    buttons: mouse_buttons,
-                                    mods,
-                                })
-                            }
-                        };
-                        
-                        d.handle_ui_event(ui_event);
-                        
-                        // After handling mouse event, re-render immediately
-                        // This is important for click handlers to show their effects
-                        if let Some(r) = renderer.as_mut() {
-                            let animation_time = start_time.elapsed().as_secs_f64();
-                            d.resolve(animation_time);
-                            
-                            let mut buffer = vec![0u8; (width * height * 4) as usize];
-                            r.render_to_vec(
-                                |scene| {
-                                    blitz_paint::paint_scene(
-                                        scene,
-                                        d,
-                                        scale as f64,
-                                        width,
-                                        height,
-                                    );
-                                },
-                                &mut buffer,
-                            );
-                            
-                            // Send the new frame
-                            let _ = frame_tx.try_send(RenderedFrame {
-                                buffer,
+                        scale,
+                    } => {
+                        if width == 0 || height == 0 {
+                            continue;
+                        }
+
+                        last_scale = scale;
+
+                        // Initialize document on first render
+                        if doc.is_none() {
+                            nih_plug::nih_log!(
+                                "Initializing DioxusDocument for embedded UI ({}x{})",
                                 width,
-                                height,
-                            });
+                                height
+                            );
+
+                            let vdom = VirtualDom::new(app);
+                            let viewport = Viewport::new(width, height, scale, ColorScheme::Dark);
+                            let mut d = DioxusDocument::new(
+                                vdom,
+                                DocumentConfig {
+                                    viewport: Some(viewport),
+                                    ..Default::default()
+                                },
+                            );
+
+                            // Inject shared state into Dioxus context if provided
+                            if let Some(state) = shared_state_for_init.clone() {
+                                d.vdom.in_scope(ScopeId::ROOT, move || {
+                                    provide_context(state);
+                                });
+                            }
+
+                            d.initial_build();
+                            doc = Some(d);
+                        }
+
+                        // Update or create renderer if size changed
+                        if last_size != (width, height) {
+                            nih_plug::nih_log!(
+                                "Resizing embedded renderer to {}x{}",
+                                width,
+                                height
+                            );
+                            renderer = Some(VelloCpuImageRenderer::new(width, height));
+                            last_size = (width, height);
+
+                            // Update document viewport
+                            if let Some(d) = doc.as_mut() {
+                                d.set_viewport(Viewport::new(
+                                    width,
+                                    height,
+                                    scale,
+                                    ColorScheme::Dark,
+                                ));
+                            }
+                        }
+
+                        let Some(d) = doc.as_mut() else { continue };
+                        let Some(r) = renderer.as_mut() else { continue };
+
+                        // Resolve layout with animation time
+                        let animation_time = start_time.elapsed().as_secs_f64();
+                        d.resolve(animation_time);
+
+                        // Render to buffer
+                        let mut buffer = vec![0u8; (width * height * 4) as usize];
+                        r.render_to_vec(
+                            |scene| {
+                                blitz_paint::paint_scene(scene, d, scale as f64, width, height);
+                            },
+                            &mut buffer,
+                        );
+
+                        // Send frame (drop if receiver is full - we'll render another)
+                        let _ = frame_tx.try_send(RenderedFrame {
+                            buffer,
+                            width,
+                            height,
+                        });
+                    }
+                    RenderCommand::MouseEvent {
+                        event_type,
+                        x,
+                        y,
+                        width,
+                        height,
+                        scale,
+                    } => {
+                        last_scale = scale;
+
+                        // Ensure document exists
+                        if doc.is_none() {
+                            let vdom = VirtualDom::new(app);
+                            let viewport = Viewport::new(width, height, scale, ColorScheme::Dark);
+                            let mut d = DioxusDocument::new(
+                                vdom,
+                                DocumentConfig {
+                                    viewport: Some(viewport),
+                                    ..Default::default()
+                                },
+                            );
+
+                            // Inject shared state into Dioxus context if provided
+                            if let Some(state) = shared_state.clone() {
+                                d.vdom.in_scope(ScopeId::ROOT, move || {
+                                    provide_context(state);
+                                });
+                            }
+
+                            d.initial_build();
+                            doc = Some(d);
+                            renderer = Some(VelloCpuImageRenderer::new(width, height));
+                            last_size = (width, height);
+                        }
+
+                        if let Some(d) = doc.as_mut() {
+                            // Create blitz mouse event
+                            let mods = Modifiers::empty();
+
+                            let ui_event = match event_type {
+                                MouseEventType::Move => UiEvent::MouseMove(BlitzMouseButtonEvent {
+                                    x,
+                                    y,
+                                    button: MouseEventButton::Main,
+                                    buttons: mouse_buttons,
+                                    mods,
+                                }),
+                                MouseEventType::Down => {
+                                    mouse_buttons |=
+                                        MouseEventButtons::from(MouseEventButton::Main);
+                                    UiEvent::MouseDown(BlitzMouseButtonEvent {
+                                        x,
+                                        y,
+                                        button: MouseEventButton::Main,
+                                        buttons: mouse_buttons,
+                                        mods,
+                                    })
+                                }
+                                MouseEventType::Up => {
+                                    mouse_buttons &=
+                                        !MouseEventButtons::from(MouseEventButton::Main);
+                                    UiEvent::MouseUp(BlitzMouseButtonEvent {
+                                        x,
+                                        y,
+                                        button: MouseEventButton::Main,
+                                        buttons: mouse_buttons,
+                                        mods,
+                                    })
+                                }
+                            };
+
+                            d.handle_ui_event(ui_event);
+
+                            // Poll the virtual DOM to process any state updates from event handlers
+                            d.poll(None);
+
+                            // After handling mouse event, re-render immediately
+                            if let Some(r) = renderer.as_mut() {
+                                let animation_time = start_time.elapsed().as_secs_f64();
+                                d.resolve(animation_time);
+
+                                let (width, height) = last_size;
+                                let mut buffer = vec![0u8; (width * height * 4) as usize];
+                                r.render_to_vec(
+                                    |scene| {
+                                        blitz_paint::paint_scene(
+                                            scene,
+                                            d,
+                                            last_scale as f64,
+                                            width,
+                                            height,
+                                        );
+                                    },
+                                    &mut buffer,
+                                );
+
+                                let _ = frame_tx.try_send(RenderedFrame {
+                                    buffer,
+                                    width,
+                                    height,
+                                });
+                            }
                         }
                     }
+                    RenderCommand::Shutdown => {
+                        nih_plug::nih_log!("Dioxus embedded render thread shutting down");
+                        break;
+                    }
                 }
-                RenderCommand::Shutdown => {
-                    nih_plug::nih_log!("Dioxus embedded render thread shutting down");
-                    break;
+            }
+
+            // Periodically poll the vdom for async updates (timers, futures, etc.)
+            // This runs even when no commands are received
+            if let Some(d) = doc.as_mut() {
+                // Poll the virtual DOM - returns true if there's more work to do
+                let has_work = d.poll(None);
+
+                // Always re-render to keep UI responsive
+                // The CPU cost is acceptable at 60fps for embedded UIs
+                let (width, height) = last_size;
+                if width > 0 && height > 0 {
+                    if let Some(r) = renderer.as_mut() {
+                        let animation_time = start_time.elapsed().as_secs_f64();
+                        d.resolve(animation_time);
+
+                        let mut buffer = vec![0u8; (width * height * 4) as usize];
+                        r.render_to_vec(
+                            |scene| {
+                                blitz_paint::paint_scene(
+                                    scene,
+                                    d,
+                                    last_scale as f64,
+                                    width,
+                                    height,
+                                );
+                            },
+                            &mut buffer,
+                        );
+
+                        // Only send if channel has space
+                        let _ = frame_tx.try_send(RenderedFrame {
+                            buffer,
+                            width,
+                            height,
+                        });
+                    }
+                }
+
+                // If there's pending async work, don't wait - immediately poll again
+                if has_work {
+                    continue;
                 }
             }
         }
@@ -439,10 +562,17 @@ impl EmbeddedEditor for DioxusEmbeddedEditor {
                 copy_rgba_to_bitmap(&frame.buffer, bitmap, width, height);
                 return true;
             }
-            
+
             // If we have a cached frame but dimensions don't match,
             // scale it to avoid flicker while waiting for new render
-            scale_rgba_to_bitmap(&frame.buffer, frame.width, frame.height, bitmap, width, height);
+            scale_rgba_to_bitmap(
+                &frame.buffer,
+                frame.width,
+                frame.height,
+                bitmap,
+                width,
+                height,
+            );
             return true;
         }
 
@@ -468,7 +598,7 @@ impl EmbeddedEditor for DioxusEmbeddedEditor {
 
         let width = self.current_width.load(Ordering::Relaxed);
         let height = self.current_height.load(Ordering::Relaxed);
-        
+
         if width == 0 || height == 0 {
             nih_plug::nih_log!("[EMBED] mouse_event: width/height is 0, ignoring");
             return 0;
@@ -547,7 +677,7 @@ fn scale_rgba_to_bitmap(
             // Map destination pixel to source pixel (nearest neighbor)
             let src_x = (dst_x * src_width / dst_width).min(src_width - 1);
             let src_y = (dst_y * src_height / dst_height).min(src_height - 1);
-            
+
             let idx = ((src_y * src_width + src_x) * 4) as usize;
             if idx + 3 < src_buffer.len() {
                 let r = apply_gamma(src_buffer[idx]);

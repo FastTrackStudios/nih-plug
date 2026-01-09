@@ -9,7 +9,7 @@ use baseview::{Size, Window, WindowHandler, WindowOpenOptions, WindowScalePolicy
 use blitz_dom::{Document as BlitzDocument, DocumentConfig};
 use blitz_traits::events::MouseEventButtons;
 use blitz_traits::shell::{ColorScheme, Viewport};
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use dioxus::prelude::*;
 use dioxus_core::ScopeId;
 use dioxus_native_dom::DioxusDocument;
@@ -19,13 +19,13 @@ use raw_window_handle_05::{HasRawDisplayHandle, HasRawWindowHandle};
 // Import raw-window-handle 0.6 types (what wgpu uses)
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 // Import from our crate
-use nih_plug_dioxus::dioxus;
 use nih_plug_dioxus::THEME_CSS;
+use nih_plug_dioxus::dioxus;
 
 // Import lumen-blocks components
 use lumen_blocks::components::button::{Button, ButtonSize, ButtonVariant};
@@ -138,7 +138,7 @@ mod standalone_renderer {
     use anyrender_vello::VelloScenePainter;
     use blitz_paint::paint_scene;
     use vello::{
-        peniko::color::AlphaColor, RenderParams, Renderer as VelloRenderer, RendererOptions, Scene,
+        RenderParams, Renderer as VelloRenderer, RendererOptions, Scene, peniko::color::AlphaColor,
     };
     use wgpu::util::TextureBlitter;
 
@@ -516,10 +516,11 @@ fn App() -> Element {
     "#;
 
     rsx! {
-        // Inject Tailwind CSS
-        document::Style { {THEME_CSS} }
+        // Inject Tailwind CSS using inline style element (not document::Style)
+        // dioxus-native/Blitz processes inline style elements directly
+        style { {THEME_CSS} }
         // Inject extra fixes
-        document::Style { {extra_css} }
+        style { {extra_css} }
 
         // Main container with dark theme (no min-h-screen to allow small windows)
         div {

@@ -1,7 +1,7 @@
 //! Parameter slider widget.
 
 use crate::context::use_param_context;
-use dioxus::prelude::*;
+use dioxus_native::prelude::*;
 use nih_plug::prelude::ParamPtr;
 
 /// Props for the ParamSlider component.

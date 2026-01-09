@@ -4,8 +4,8 @@ use crossbeam::atomic::AtomicCell;
 use nih_plug::params::persist::PersistentField;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// State for a `nih_plug_dioxus` editor.
 ///
@@ -35,9 +35,17 @@ use std::sync::Arc;
 /// ```
 #[derive(Serialize, Deserialize)]
 pub struct DioxusState {
-    /// A function that returns the window's current size in logical pixels.
+    /// Default size function (used when size hasn't been explicitly set).
     #[serde(skip, default = "empty_size_fn")]
-    size_fn: Box<dyn Fn() -> (u32, u32) + Send + Sync>,
+    default_size_fn: Box<dyn Fn() -> (u32, u32) + Send + Sync>,
+
+    /// Current window width (0 means use default_size_fn).
+    #[serde(with = "nih_plug::params::persist::serialize_atomic_cell")]
+    width: AtomicCell<u32>,
+
+    /// Current window height (0 means use default_size_fn).
+    #[serde(with = "nih_plug::params::persist::serialize_atomic_cell")]
+    height: AtomicCell<u32>,
 
     /// A scale factor applied on top of any system HiDPI scaling.
     #[serde(with = "nih_plug::params::persist::serialize_atomic_cell")]
@@ -46,6 +54,10 @@ pub struct DioxusState {
     /// Whether the editor window is currently open.
     #[serde(skip)]
     open: AtomicBool,
+
+    /// Pending resize request (width, height). Set by UI, consumed by window handler.
+    #[serde(skip)]
+    pending_resize: AtomicCell<Option<(u32, u32)>>,
 }
 
 fn empty_size_fn() -> Box<dyn Fn() -> (u32, u32) + Send + Sync> {
@@ -54,9 +66,9 @@ fn empty_size_fn() -> Box<dyn Fn() -> (u32, u32) + Send + Sync> {
 
 impl Debug for DioxusState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (width, height) = (self.size_fn)();
+        let (width, height) = self.size();
         f.debug_struct("DioxusState")
-            .field("size_fn", &format!("<fn> ({}, {})", width, height))
+            .field("size", &format!("({}, {})", width, height))
             .field("scale_factor", &self.scale_factor)
             .field("open", &self.open)
             .finish()
@@ -64,32 +76,25 @@ impl Debug for DioxusState {
 }
 
 impl DioxusState {
-    /// Create a new editor state with a size function.
+    /// Create a new editor state with a default size function.
     ///
-    /// The size function should return the window's logical size in pixels.
-    /// This can be a static size or computed based on plugin state.
+    /// The size function provides the initial/default window size in logical pixels.
+    /// The window can be resized by the user, and the new size will be persisted.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // Static size
+    /// // Static default size
     /// let state = DioxusState::new(|| (400, 300));
-    ///
-    /// // Dynamic size based on some state
-    /// let expanded = Arc::new(AtomicBool::new(false));
-    /// let state = DioxusState::new(move || {
-    ///     if expanded.load(Ordering::Relaxed) {
-    ///         (800, 600)
-    ///     } else {
-    ///         (400, 300)
-    ///     }
-    /// });
     /// ```
-    pub fn new(size_fn: impl Fn() -> (u32, u32) + Send + Sync + 'static) -> Arc<Self> {
+    pub fn new(default_size_fn: impl Fn() -> (u32, u32) + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
-            size_fn: Box::new(size_fn),
+            default_size_fn: Box::new(default_size_fn),
+            width: AtomicCell::new(0),
+            height: AtomicCell::new(0),
             scale_factor: AtomicCell::new(1.0),
             open: AtomicBool::new(false),
+            pending_resize: AtomicCell::new(None),
         })
     }
 
@@ -97,19 +102,62 @@ impl DioxusState {
     ///
     /// This scale factor is applied on top of any system HiDPI scaling.
     pub fn new_with_default_scale_factor(
-        size_fn: impl Fn() -> (u32, u32) + Send + Sync + 'static,
+        default_size_fn: impl Fn() -> (u32, u32) + Send + Sync + 'static,
         default_scale_factor: f64,
     ) -> Arc<Self> {
         Arc::new(Self {
-            size_fn: Box::new(size_fn),
+            default_size_fn: Box::new(default_size_fn),
+            width: AtomicCell::new(0),
+            height: AtomicCell::new(0),
             scale_factor: AtomicCell::new(default_scale_factor),
             open: AtomicBool::new(false),
+            pending_resize: AtomicCell::new(None),
         })
+    }
+
+    /// Returns the current window size in logical pixels.
+    /// If the size hasn't been explicitly set, returns the default size.
+    pub fn size(&self) -> (u32, u32) {
+        let w = self.width.load();
+        let h = self.height.load();
+        if w == 0 || h == 0 {
+            (self.default_size_fn)()
+        } else {
+            (w, h)
+        }
+    }
+
+    /// Set the window size. This updates the stored size but doesn't resize the window directly.
+    /// Call `request_resize` to actually resize the window.
+    pub fn set_size(&self, width: u32, height: u32) {
+        self.width.store(width);
+        self.height.store(height);
+    }
+
+    /// Request a window resize. The window handler will pick this up and resize the window.
+    /// Note: This overwrites any pending resize, so rapid calls will only process the latest.
+    pub fn request_resize(&self, width: u32, height: u32) {
+        nih_plug::nih_log!("[STATE] request_resize called: {}x{}", width, height);
+        // Only store if size actually changed to reduce unnecessary updates
+        let current = self.pending_resize.load();
+        if current != Some((width, height)) {
+            self.pending_resize.store(Some((width, height)));
+            nih_plug::nih_log!("[STATE] Stored pending resize: {}x{}", width, height);
+        }
+    }
+
+    /// Take the pending resize request, if any. Used by the window handler.
+    pub fn take_pending_resize(&self) -> Option<(u32, u32)> {
+        let result = self.pending_resize.take();
+        if result.is_some() {
+            nih_plug::nih_log!("[STATE] take_pending_resize: {:?}", result);
+        }
+        result
     }
 
     /// Returns the window size in logical pixels after applying the user scale factor.
     pub fn scaled_logical_size(&self) -> (u32, u32) {
-        let (width, height) = self.inner_logical_size();
+        let (width, height) = self.size();
         let scale = self.scale_factor.load();
         (
             (width as f64 * scale).round() as u32,
@@ -118,8 +166,9 @@ impl DioxusState {
     }
 
     /// Returns the window size in logical pixels before applying the user scale factor.
+    /// Alias for `size()` for backwards compatibility.
     pub fn inner_logical_size(&self) -> (u32, u32) {
-        (self.size_fn)()
+        self.size()
     }
 
     /// Get the user scale factor.
@@ -145,6 +194,8 @@ impl DioxusState {
 
 impl<'a> PersistentField<'a, DioxusState> for Arc<DioxusState> {
     fn set(&self, new_value: DioxusState) {
+        self.width.store(new_value.width.load());
+        self.height.store(new_value.height.load());
         self.scale_factor.store(new_value.scale_factor.load());
     }
 

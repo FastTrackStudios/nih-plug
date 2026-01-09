@@ -9,7 +9,7 @@ pub use keyboard_types::Modifiers;
 
 // Alias for the 0.7 Modifiers from blitz-traits (via dioxus re-export)
 // This is what BlitzMouseButtonEvent expects
-type BlitzModifiers = dioxus::prelude::Modifiers;
+type BlitzModifiers = dioxus_native::prelude::Modifiers;
 
 /// Translate a baseview event to a blitz UiEvent.
 pub fn translate_event(

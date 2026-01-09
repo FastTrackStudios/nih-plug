@@ -1,8 +1,9 @@
 //! Hot reload support via dioxus-devtools.
 
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use blitz_dom::Document as _;
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use dioxus_devtools::DevserverMsg;
-use dioxus_native_dom::DioxusDocument;
+use dioxus_native::DioxusDocument;
 
 /// State for managing hot reload connections.
 pub struct HotReloadState {
@@ -40,7 +41,7 @@ impl HotReloadState {
                     // Reload any changed assets
                     for asset_path in &hotreload_msg.assets {
                         if let Some(url) = asset_path.to_str() {
-                            doc.reload_resource_by_href(url);
+                            doc.inner_mut().reload_resource_by_href(url);
                         }
                     }
                 }
