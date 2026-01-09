@@ -290,6 +290,70 @@ impl WindowHandler for DioxusSoftbufferWindowHandler {
             }
         }
 
+        // Check for pending resize request from the UI (UI provides LOGICAL size)
+        if let Some((new_logical_width, new_logical_height)) =
+            self.dioxus_state.take_pending_resize()
+        {
+            nih_plug::nih_log!(
+                "[Softbuffer RESIZE] Pending resize: {}x{} logical (current physical: {}x{})",
+                new_logical_width,
+                new_logical_height,
+                self.width,
+                self.height
+            );
+
+            // Sanity check - don't resize to crazy values (in logical pixels)
+            if new_logical_width > 4096
+                || new_logical_height > 4096
+                || new_logical_width < 100
+                || new_logical_height < 100
+            {
+                nih_plug::nih_warn!(
+                    "[Softbuffer RESIZE] Ignoring invalid size: {}x{}",
+                    new_logical_width,
+                    new_logical_height
+                );
+            } else {
+                // Resize the window (baseview takes logical size)
+                window.resize(baseview::Size::new(
+                    new_logical_width as f64,
+                    new_logical_height as f64,
+                ));
+
+                // Calculate physical size
+                let new_physical_width = (new_logical_width as f32 * self.scale_factor) as u32;
+                let new_physical_height = (new_logical_height as f32 * self.scale_factor) as u32;
+
+                // Update our tracked PHYSICAL size
+                self.width = new_physical_width;
+                self.height = new_physical_height;
+
+                // Update the stored size in DioxusState (logical for persistence)
+                self.dioxus_state
+                    .set_size(new_logical_width, new_logical_height);
+
+                // Notify the host that the window size changed
+                self.gui_context.request_resize();
+
+                // Update document viewport with PHYSICAL size
+                if let Some(doc) = &mut self.dioxus_doc {
+                    doc.inner_mut().set_viewport(Viewport::new(
+                        new_physical_width,
+                        new_physical_height,
+                        self.scale_factor,
+                        ColorScheme::Light,
+                    ));
+                }
+
+                // Resize wgpu offscreen state with physical size
+                if let Some(wgpu_state) = &mut self.wgpu_state {
+                    wgpu_state.resize(new_physical_width, new_physical_height);
+                }
+
+                self.needs_redraw.store(true, Ordering::Relaxed);
+            }
+        }
+
         let animation_time = self.animation_start.elapsed().as_secs_f64();
         let needs_redraw = self.needs_redraw.clone();
         let scale_factor = self.scale_factor;
