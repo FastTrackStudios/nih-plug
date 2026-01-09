@@ -48,8 +48,9 @@ fn main() {
         match status {
             Ok(s) if s.success() => {
                 println!("cargo:warning=Tailwind CSS compiled successfully");
-                // Post-process to remove @layer wrappers (Blitz/Stylo doesn't fully support them)
-                strip_css_layers(&output_css);
+                // NOTE: Testing if @layer works natively in Blitz/Stylo
+                // Stylo 0.10.0 does have LayerOrder support, so this might not be needed
+                // strip_css_layers(&output_css);
             }
             Ok(s) => {
                 println!(
