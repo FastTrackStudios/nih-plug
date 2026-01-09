@@ -82,7 +82,12 @@ impl WgpuOffscreenState {
         let render_texture_view = render_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create staging buffer for reading back pixels
-        let buffer_size = (width * height * 4) as u64;
+        // Must account for row alignment padding (COPY_BYTES_PER_ROW_ALIGNMENT = 256)
+        let bytes_per_pixel = 4u32;
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let buffer_size = (padded_bytes_per_row * height) as u64;
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging buffer"),
             size: buffer_size,
@@ -132,8 +137,12 @@ impl WgpuOffscreenState {
 
         self.render_texture_view = self.render_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Recreate staging buffer
-        let buffer_size = (width * height * 4) as u64;
+        // Recreate staging buffer with row alignment padding
+        let bytes_per_pixel = 4u32;
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let buffer_size = (padded_bytes_per_row * height) as u64;
         self.staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging buffer"),
             size: buffer_size,
