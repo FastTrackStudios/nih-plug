@@ -1,0 +1,4 @@
+[submodule "libs/vendor/blitz"]
+	path = libs/vendor/blitz
+	url = https://github.com/Codys-Wright/blitz.git
+	branch = post-processing

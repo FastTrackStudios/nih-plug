@@ -275,7 +275,7 @@ impl DioxusEmbeddedEditor {
 
                             // Update document viewport
                             if let Some(d) = doc.as_mut() {
-                                d.set_viewport(Viewport::new(
+                                d.inner.borrow_mut().set_viewport(Viewport::new(
                                     width,
                                     height,
                                     scale,
@@ -289,13 +289,13 @@ impl DioxusEmbeddedEditor {
 
                         // Resolve layout with animation time
                         let animation_time = start_time.elapsed().as_secs_f64();
-                        d.resolve(animation_time);
+                        d.inner.borrow_mut().resolve(animation_time);
 
                         // Render to buffer
                         let mut buffer = vec![0u8; (width * height * 4) as usize];
                         r.render_to_vec(
                             |scene| {
-                                blitz_paint::paint_scene(scene, d, scale as f64, width, height);
+                                blitz_paint::paint_scene(scene, &*d.inner.borrow(), scale as f64, width, height);
                             },
                             &mut buffer,
                         );
@@ -386,7 +386,7 @@ impl DioxusEmbeddedEditor {
                             // After handling mouse event, re-render immediately
                             if let Some(r) = renderer.as_mut() {
                                 let animation_time = start_time.elapsed().as_secs_f64();
-                                d.resolve(animation_time);
+                                d.inner.borrow_mut().resolve(animation_time);
 
                                 let (width, height) = last_size;
                                 let mut buffer = vec![0u8; (width * height * 4) as usize];
@@ -394,7 +394,7 @@ impl DioxusEmbeddedEditor {
                                     |scene| {
                                         blitz_paint::paint_scene(
                                             scene,
-                                            d,
+                                            &*d.inner.borrow(),
                                             last_scale as f64,
                                             width,
                                             height,
@@ -430,14 +430,14 @@ impl DioxusEmbeddedEditor {
                 if width > 0 && height > 0 {
                     if let Some(r) = renderer.as_mut() {
                         let animation_time = start_time.elapsed().as_secs_f64();
-                        d.resolve(animation_time);
+                        d.inner.borrow_mut().resolve(animation_time);
 
                         let mut buffer = vec![0u8; (width * height * 4) as usize];
                         r.render_to_vec(
                             |scene| {
                                 blitz_paint::paint_scene(
                                     scene,
-                                    d,
+                                    &*d.inner.borrow(),
                                     last_scale as f64,
                                     width,
                                     height,
