@@ -56,8 +56,15 @@ pub struct DioxusState {
     open: AtomicBool,
 
     /// Pending resize request (width, height). Set by UI, consumed by window handler.
+    /// This triggers window.resize() + gui_context.request_resize() (plugin→host).
     #[serde(skip)]
     pending_resize: AtomicCell<Option<(u32, u32)>>,
+
+    /// Pending host-driven resize (width, height). Set by host via set_size(),
+    /// consumed by window handler. Only updates viewport/wgpu, does NOT call
+    /// back to the host (avoiding feedback loop).
+    #[serde(skip)]
+    pending_host_resize: AtomicCell<Option<(u32, u32)>>,
 }
 
 fn empty_size_fn() -> Box<dyn Fn() -> (u32, u32) + Send + Sync> {
@@ -95,6 +102,7 @@ impl DioxusState {
             scale_factor: AtomicCell::new(1.0),
             open: AtomicBool::new(false),
             pending_resize: AtomicCell::new(None),
+            pending_host_resize: AtomicCell::new(None),
         })
     }
 
@@ -112,6 +120,7 @@ impl DioxusState {
             scale_factor: AtomicCell::new(default_scale_factor),
             open: AtomicBool::new(false),
             pending_resize: AtomicCell::new(None),
+            pending_host_resize: AtomicCell::new(None),
         })
     }
 
@@ -153,6 +162,17 @@ impl DioxusState {
             nih_plug::nih_log!("[STATE] take_pending_resize: {:?}", result);
         }
         result
+    }
+
+    /// Queue a host-driven resize. The window handler updates viewport/wgpu
+    /// but does NOT call window.resize() or gui_context.request_resize().
+    pub fn host_set_size(&self, width: u32, height: u32) {
+        self.pending_host_resize.store(Some((width, height)));
+    }
+
+    /// Take the pending host-driven resize, if any.
+    pub fn take_pending_host_resize(&self) -> Option<(u32, u32)> {
+        self.pending_host_resize.take()
     }
 
     /// Returns the window size in logical pixels after applying the user scale factor.

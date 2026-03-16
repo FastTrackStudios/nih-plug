@@ -2737,15 +2737,13 @@ impl<P: ClapPlugin> Wrapper<P> {
     }
 
     unsafe extern "C" fn ext_gui_can_resize(_plugin: *const clap_plugin) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+        true
     }
 
     unsafe extern "C" fn ext_gui_get_resize_hints(
         _plugin: *const clap_plugin,
         _hints: *mut clap_gui_resize_hints,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
         false
     }
 
@@ -2754,8 +2752,8 @@ impl<P: ClapPlugin> Wrapper<P> {
         _width: *mut u32,
         _height: *mut u32,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        false
+        // Accept any size the host proposes
+        true
     }
 
     unsafe extern "C" fn ext_gui_set_size(
@@ -2763,20 +2761,20 @@ impl<P: ClapPlugin> Wrapper<P> {
         width: u32,
         height: u32,
     ) -> bool {
-        // TODO: Implement Host->Plugin GUI resizing
-        // TODO: The host will also call this if an asynchronous (on Linux) resize request fails
         check_null_ptr!(false, plugin, (*plugin).plugin_data);
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
-        let (unscaled_width, unscaled_height) =
-            wrapper.editor.borrow().as_ref().unwrap().lock().size();
+        // Convert from scaled to unscaled size
         let scaling_factor = wrapper.editor_scaling_factor.load(Ordering::Relaxed);
-        let (editor_width, editor_height) = (
-            (unscaled_width as f32 * scaling_factor).round() as u32,
-            (unscaled_height as f32 * scaling_factor).round() as u32,
-        );
+        let unscaled_width = (width as f32 / scaling_factor).round() as u32;
+        let unscaled_height = (height as f32 / scaling_factor).round() as u32;
 
-        width == editor_width && height == editor_height
+        // Update the editor's stored size
+        if let Some(editor) = wrapper.editor.borrow().as_ref() {
+            return editor.lock().set_size(unscaled_width, unscaled_height);
+        }
+
+        false
     }
 
     unsafe extern "C" fn ext_gui_set_parent(

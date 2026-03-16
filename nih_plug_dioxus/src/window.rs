@@ -267,6 +267,11 @@ impl DioxusWindowHandler {
             ColorScheme::Light,
         );
 
+        nih_plug::nih_log!(
+            "[VIEWPORT] Creating DioxusDocument with viewport: {}x{} physical, scale={}",
+            self.width, self.height, self.scale_factor
+        );
+
         // Create the Dioxus document
         let mut dioxus_doc = DioxusDocument::new(
             vdom,
@@ -420,6 +425,44 @@ impl WindowHandler for DioxusWindowHandler {
             }
         }
 
+        // Check for host-driven resize (set_size from host — no callback to host)
+        if let Some((new_logical_width, new_logical_height)) =
+            self.dioxus_state.take_pending_host_resize()
+        {
+            let new_physical_width = (new_logical_width as f32 * self.scale_factor) as u32;
+            let new_physical_height = (new_logical_height as f32 * self.scale_factor) as u32;
+
+            // Resize the baseview window (needed for the child NSView to match)
+            window.resize(baseview::Size::new(
+                new_logical_width as f64,
+                new_logical_height as f64,
+            ));
+
+            self.width = new_physical_width;
+            self.height = new_physical_height;
+
+            self.dioxus_state
+                .set_size(new_logical_width, new_logical_height);
+
+            // NOTE: Do NOT call gui_context.request_resize() here — the host
+            // is already driving this resize, calling back would create a loop.
+
+            if let Some(doc) = &mut self.dioxus_doc {
+                doc.inner_mut().set_viewport(Viewport::new(
+                    new_physical_width,
+                    new_physical_height,
+                    self.scale_factor,
+                    ColorScheme::Light,
+                ));
+            }
+
+            if let Some(wgpu_state) = &mut self.wgpu_state {
+                wgpu_state.resize(new_physical_width, new_physical_height);
+            }
+
+            self.needs_redraw.store(true, Ordering::Relaxed);
+        }
+
         // Get animation time upfront before any mutable borrows
         let animation_time = self.animation_start.elapsed().as_secs_f64();
         let needs_redraw = self.needs_redraw.clone();
@@ -472,6 +515,19 @@ impl WindowHandler for DioxusWindowHandler {
         // Resolve layout with animation time
         doc.inner_mut().resolve(animation_time);
 
+        // Log viewport info periodically
+        static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let frame = FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
+        if frame % 300 == 0 {
+            let inner = doc.inner();
+            let vp = inner.viewport();
+            nih_plug::nih_log!(
+                "[FRAME {}] viewport: {}x{} hidpi={} zoom={}, render: {}x{}",
+                frame, vp.window_size.0, vp.window_size.1,
+                vp.hidpi_scale, vp.zoom, physical_width, physical_height
+            );
+        }
+
         // Render at physical size
         renderer.render(
             wgpu_state,
@@ -523,6 +579,7 @@ impl WindowHandler for DioxusWindowHandler {
                 if let Some(wgpu_state) = &mut self.wgpu_state {
                     wgpu_state.resize(self.width, self.height);
                 }
+
                 self.needs_redraw.store(true, Ordering::Relaxed);
                 return EventStatus::Captured;
             }

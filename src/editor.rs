@@ -52,6 +52,13 @@ pub trait Editor: Send {
     /// scaling factor to get the actual physical screen pixels.
     fn size(&self) -> (u32, u32);
 
+    /// Set the editor size in logical pixels. Called by the host when the user resizes the window.
+    /// Returns true if the size was accepted.
+    fn set_size(&self, width: u32, height: u32) -> bool {
+        let _ = (width, height);
+        false
+    }
+
     /// Set the DPI scaling factor, if supported. The plugin APIs don't make any guarantees on when
     /// this is called, but for now just assume it will be the first function that gets called
     /// before creating the editor. If this is set, then any windows created by this editor should

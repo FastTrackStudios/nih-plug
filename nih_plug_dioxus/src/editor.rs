@@ -123,6 +123,14 @@ impl Editor for DioxusEditor {
         self.state.scaled_logical_size()
     }
 
+    fn set_size(&self, width: u32, height: u32) -> bool {
+        self.state.set_size(width, height);
+        // Use host_set_size path — updates viewport/wgpu without calling back to host
+        self.state.host_set_size(width, height);
+        self.needs_redraw.store(true, Ordering::Relaxed);
+        true
+    }
+
     fn set_scale_factor(&self, factor: f32) -> bool {
         // Don't allow scale factor changes while the editor is open
         if self.state.is_open() {
