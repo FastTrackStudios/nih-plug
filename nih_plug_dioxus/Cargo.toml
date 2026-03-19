@@ -38,8 +38,8 @@ anyrender_vello_cpu = { version = "0.8", optional = true }
 anyrender = { version = "0.6", optional = true }
 softbuffer = { version = "0.4", optional = true }
 
-# Window management - using local fork with raw-window-handle 0.6 for softbuffer compatibility
-baseview = { path = "../../vendor/baseview" }
+# Window management - using fork with raw-window-handle 0.6 for softbuffer compatibility
+baseview = { git = "https://github.com/Codys-Wright/baseview.git", branch = "upgrade_rwh" }
 
 # raw-window-handle 0.6 (compatible with baseview fork, wgpu, and softbuffer)
 raw-window-handle = "0.6"
