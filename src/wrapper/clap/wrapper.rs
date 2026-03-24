@@ -38,7 +38,8 @@ use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS,
     CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS, CLAP_PARAM_IS_HIDDEN,
     CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY,
-    CLAP_PARAM_IS_STEPPED, CLAP_PARAM_RESCAN_VALUES,
+    CLAP_PARAM_IS_STEPPED, CLAP_PARAM_RESCAN_ALL, CLAP_PARAM_RESCAN_INFO,
+    CLAP_PARAM_RESCAN_VALUES,
 };
 use clap_sys::ext::render::{
     clap_plugin_render, clap_plugin_render_mode, CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE,
@@ -79,6 +80,9 @@ use std::time::Duration;
 
 use super::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use super::descriptor::PluginDescriptor;
+use super::gain_adjustment::{
+    ClapPluginGainAdjustmentMetering, CLAP_EXT_GAIN_ADJUSTMENT_METERING,
+};
 use super::reaper_embed::{
     handle_embed_message, ClapPluginReaperEmbedUi, CLAP_EXT_REAPER_EMBED_UI,
 };
@@ -133,6 +137,8 @@ pub struct Wrapper<P: ClapPlugin> {
     embedded_editor: AtomicRefCell<Option<Arc<dyn EmbeddedEditor>>>,
     /// The CLAP extension vtable for REAPER's embedded UI.
     clap_plugin_reaper_embed_ui: ClapPluginReaperEmbedUi,
+    /// The CLAP extension vtable for gain adjustment metering.
+    clap_plugin_gain_adjustment_metering: ClapPluginGainAdjustmentMetering,
 
     is_processing: AtomicBool,
     /// The current IO configuration, modified through the `clap_plugin_audio_ports_config`
@@ -173,7 +179,7 @@ pub struct Wrapper<P: ClapPlugin> {
     updated_state_receiver: channel::Receiver<PluginState>,
 
     // We'll query all of the host's extensions upfront
-    host_callback: ClapPtr<clap_host>,
+    pub(crate) host_callback: ClapPtr<clap_host>,
 
     clap_plugin_audio_ports_config: clap_plugin_audio_ports_config,
 
@@ -288,6 +294,12 @@ pub enum Task<P: Plugin> {
     VoiceInfoChanged,
     /// Tell the host that it should rescan the current parameter values.
     RescanParamValues,
+    /// Tell the host to rescan parameter info (names, module paths, visibility).
+    /// Corresponds to CLAP_PARAM_RESCAN_INFO.
+    RescanParamInfo,
+    /// Tell the host to fully rescan all parameters (structural changes, ranges, steps).
+    /// Corresponds to CLAP_PARAM_RESCAN_ALL and triggers a restart cycle.
+    RescanParamAll,
 }
 
 /// The types of CLAP parameter updates for events.
@@ -428,6 +440,18 @@ impl<P: ClapPlugin> MainThreadExecutor<Task<P>> for Wrapper<P> {
                 }
                 None => nih_debug_assert_failure!("The host does not support parameters? What?"),
             },
+            Task::RescanParamInfo => match &*self.host_params.borrow() {
+                Some(host_params) => {
+                    nih_debug_assert!(is_gui_thread);
+                    unsafe_clap_call! { host_params=>rescan(&*self.host_callback, CLAP_PARAM_RESCAN_INFO) };
+                }
+                None => nih_debug_assert_failure!("The host does not support parameters? What?"),
+            },
+            Task::RescanParamAll => {
+                // RESCAN_ALL requires a restart cycle (deactivate → rescan → activate).
+                // request_restart() tells the host to do this.
+                unsafe_clap_call! { &*self.host_callback=>request_restart(&*self.host_callback) };
+            }
         };
     }
 }
@@ -556,6 +580,9 @@ impl<P: ClapPlugin> Wrapper<P> {
             embedded_editor: AtomicRefCell::new(None),
             clap_plugin_reaper_embed_ui: ClapPluginReaperEmbedUi {
                 inline_editor: Some(Self::ext_reaper_embed_inline_editor),
+            },
+            clap_plugin_gain_adjustment_metering: ClapPluginGainAdjustmentMetering {
+                get: Some(Self::ext_gain_adjustment_metering_get),
             },
 
             is_processing: AtomicBool::new(false),
@@ -850,8 +877,12 @@ impl<P: ClapPlugin> Wrapper<P> {
             Some(param_ptr) => {
                 match update_type {
                     ClapParamUpdate::PlainValueSet(clap_plain_value) => {
-                        let normalized_value = clap_plain_value as f32
-                            / unsafe { param_ptr.step_count() }.unwrap_or(1) as f32;
+                        let normalized_value = match unsafe { param_ptr.step_count() } {
+                            Some(step_count) => clap_plain_value as f32 / step_count as f32,
+                            None => unsafe {
+                                param_ptr.preview_normalized(clap_plain_value as f32)
+                            },
+                        };
 
                         if unsafe { param_ptr.set_normalized_value(normalized_value) } {
                             if let Some(sample_rate) = sample_rate {
@@ -871,8 +902,20 @@ impl<P: ClapPlugin> Wrapper<P> {
                         true
                     }
                     ClapParamUpdate::PlainValueMod(clap_plain_delta) => {
-                        let normalized_delta = clap_plain_delta as f32
-                            / unsafe { param_ptr.step_count() }.unwrap_or(1) as f32;
+                        let normalized_delta = match unsafe { param_ptr.step_count() } {
+                            Some(step_count) => clap_plain_delta as f32 / step_count as f32,
+                            None => {
+                                // For float params, convert the plain delta to a normalized delta
+                                // by computing the difference in normalized space
+                                let current_normalized =
+                                    unsafe { param_ptr.modulated_normalized_value() };
+                                let current_plain = unsafe { param_ptr.preview_plain(current_normalized) };
+                                let target_plain = current_plain + clap_plain_delta as f32;
+                                let target_normalized =
+                                    unsafe { param_ptr.preview_normalized(target_plain) };
+                                target_normalized - current_normalized
+                            }
+                        };
 
                         if unsafe { param_ptr.modulate_value(normalized_delta) } {
                             if let Some(sample_rate) = sample_rate {
@@ -1446,8 +1489,10 @@ impl<P: ClapPlugin> Wrapper<P> {
                     // The modulation offset needs to be normalized to account for modulated
                     // integer or enum parameters
                     let param_ptr = self.param_by_hash[&event.param_id];
-                    let normalized_value =
-                        event.value as f32 / param_ptr.step_count().unwrap_or(1) as f32;
+                    let normalized_value = match param_ptr.step_count() {
+                        Some(step_count) => event.value as f32 / step_count as f32,
+                        None => param_ptr.preview_normalized(event.value as f32),
+                    };
 
                     input_events.push_back(NoteEvent::MonoAutomation {
                         timing,
@@ -1465,8 +1510,16 @@ impl<P: ClapPlugin> Wrapper<P> {
                             // The modulation offset needs to be normalized to account for modulated
                             // integer or enum parameters
                             let param_ptr = self.param_by_hash[&event.param_id];
-                            let normalized_offset =
-                                event.amount as f32 / param_ptr.step_count().unwrap_or(1) as f32;
+                            let normalized_offset = match param_ptr.step_count() {
+                                Some(step_count) => event.amount as f32 / step_count as f32,
+                                None => {
+                                    // Convert plain delta to normalized delta
+                                    let current_norm = param_ptr.modulated_normalized_value();
+                                    let current_plain = param_ptr.preview_plain(current_norm);
+                                    let target_plain = current_plain + event.amount as f32;
+                                    param_ptr.preview_normalized(target_plain) - current_norm
+                                }
+                            };
 
                             // The host may also add key and channel information here, but it may
                             // also pass -1. So not having that information here at all seems like
@@ -2359,6 +2412,8 @@ impl<P: ClapPlugin> Wrapper<P> {
             &wrapper.clap_plugin_tail as *const _ as *const c_void
         } else if id == CLAP_EXT_VOICE_INFO && P::CLAP_POLY_MODULATION_CONFIG.is_some() {
             &wrapper.clap_plugin_voice_info as *const _ as *const c_void
+        } else if id == CLAP_EXT_GAIN_ADJUSTMENT_METERING {
+            &wrapper.clap_plugin_gain_adjustment_metering as *const _ as *const c_void
         } else if id == CLAP_EXT_REAPER_EMBED_UI && wrapper.embedded_editor.borrow().is_some() {
             // Only report that we support this extension if the plugin has an embedded editor
             &wrapper.clap_plugin_reaper_embed_ui as *const _ as *const c_void
@@ -2958,17 +3013,22 @@ impl<P: ClapPlugin> Wrapper<P> {
             param_info.flags |= CLAP_PARAM_IS_STEPPED
         }
         param_info.cookie = std::ptr::null_mut();
-        strlcpy(&mut param_info.name, param_ptr.name());
+        strlcpy(&mut param_info.name, &param_ptr.effective_name());
         strlcpy(&mut param_info.module, param_group);
-        // We don't use the actual minimum and maximum values here because that would not scale
-        // with skewed integer ranges. Instead, just treat all parameters as `[0, 1]` normalized
-        // parameters multiplied by the step size.
-        param_info.min_value = 0.0;
-        // Stepped parameters are unnormalized float parameters since there's no separate step
-        // range option
-        // TODO: This should probably be encapsulated in some way so we don't forget about this in one place
-        param_info.max_value = step_count.unwrap_or(1) as f64;
-        param_info.default_value = default_value as f64 * step_count.unwrap_or(1) as f64;
+        match step_count {
+            Some(step_count) => {
+                // Stepped parameters (int, bool, enum): use normalized * step_count range
+                param_info.min_value = 0.0;
+                param_info.max_value = step_count as f64;
+                param_info.default_value = default_value as f64 * step_count as f64;
+            }
+            None => {
+                // Float parameters: expose actual plain value range (Hz, dB, etc.)
+                param_info.min_value = param_ptr.preview_plain(0.0) as f64;
+                param_info.max_value = param_ptr.preview_plain(1.0) as f64;
+                param_info.default_value = param_ptr.default_plain_value() as f64;
+            }
+        }
 
         true
     }
@@ -2983,8 +3043,12 @@ impl<P: ClapPlugin> Wrapper<P> {
 
         match wrapper.param_by_hash.get(&param_id) {
             Some(param_ptr) => {
-                *value = param_ptr.modulated_normalized_value() as f64
-                    * param_ptr.step_count().unwrap_or(1) as f64;
+                *value = match param_ptr.step_count() {
+                    Some(step_count) => {
+                        param_ptr.modulated_normalized_value() as f64 * step_count as f64
+                    }
+                    None => param_ptr.modulated_plain_value() as f64,
+                };
 
                 true
             }
@@ -3006,13 +3070,14 @@ impl<P: ClapPlugin> Wrapper<P> {
 
         match wrapper.param_by_hash.get(&param_id) {
             Some(param_ptr) => {
+                let normalized = match param_ptr.step_count() {
+                    Some(step_count) => value as f32 / step_count as f32,
+                    None => param_ptr.preview_normalized(value as f32),
+                };
                 strlcpy(
                     dest,
                     // CLAP does not have a separate unit, so we'll include the unit here
-                    &param_ptr.normalized_value_to_string(
-                        value as f32 / param_ptr.step_count().unwrap_or(1) as f32,
-                        true,
-                    ),
+                    &param_ptr.normalized_value_to_string(normalized, true),
                 );
 
                 true
@@ -3038,10 +3103,13 @@ impl<P: ClapPlugin> Wrapper<P> {
         match wrapper.param_by_hash.get(&param_id) {
             Some(param_ptr) => {
                 let normalized_value = match param_ptr.string_to_normalized_value(display) {
-                    Some(v) => v as f64,
+                    Some(v) => v,
                     None => return false,
                 };
-                *value = normalized_value * param_ptr.step_count().unwrap_or(1) as f64;
+                *value = match param_ptr.step_count() {
+                    Some(step_count) => normalized_value as f64 * step_count as f64,
+                    None => param_ptr.preview_plain(normalized_value) as f64,
+                };
 
                 true
             }
@@ -3258,6 +3326,18 @@ impl<P: ClapPlugin> Wrapper<P> {
                 0
             }
         }
+    }
+
+    /// Gain adjustment metering extension callback.
+    ///
+    /// Returns the current gain adjustment in dB from the plugin.
+    unsafe extern "C" fn ext_gain_adjustment_metering_get(
+        plugin: *const clap_plugin,
+    ) -> f64 {
+        check_null_ptr!(0.0, plugin, (*plugin).plugin_data);
+        let wrapper = &*((*plugin).plugin_data as *const Self);
+
+        wrapper.plugin.lock().gain_adjustment_db()
     }
 }
 
