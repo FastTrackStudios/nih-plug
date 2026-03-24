@@ -90,6 +90,13 @@ impl<P: ClapPlugin> InitContext<P> for WrapperInitContext<'_, P> {
     fn set_current_voice_capacity(&self, capacity: u32) {
         self.wrapper.set_current_voice_capacity(capacity)
     }
+
+    fn raw_host_context(&self) -> Option<*const std::ffi::c_void> {
+        // Return the clap_host pointer so plugins can call get_extension()
+        // for DAW-specific APIs (e.g. REAPER's "cockos.reaper_extension")
+        let host_ptr: *const clap_sys::host::clap_host = &*self.wrapper.host_callback;
+        Some(host_ptr as *const std::ffi::c_void)
+    }
 }
 
 impl<P: ClapPlugin> ProcessContext<P> for WrapperProcessContext<'_, P> {
@@ -126,6 +133,29 @@ impl<P: ClapPlugin> ProcessContext<P> for WrapperProcessContext<'_, P> {
 
     fn set_current_voice_capacity(&self, capacity: u32) {
         self.wrapper.set_current_voice_capacity(capacity)
+    }
+
+    unsafe fn set_output_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+        match self.wrapper.param_ptr_to_hash.get(&param) {
+            Some(hash) => {
+                // Update the internal value so the param reads correctly
+                param.set_normalized_value(normalized);
+
+                // Queue a CLAP output event so the host sees the change
+                let clap_plain_value = match param.step_count() {
+                    Some(step_count) => normalized as f64 * step_count as f64,
+                    None => param.preview_plain(normalized) as f64,
+                };
+                self.wrapper
+                    .queue_parameter_event(OutputParamEvent::SetValue {
+                        param_hash: *hash,
+                        clap_plain_value,
+                    });
+            }
+            None => nih_debug_assert_failure!(
+                "set_output_parameter_normalized() called with an unknown ParamPtr"
+            ),
+        }
     }
 }
 
@@ -176,7 +206,10 @@ impl<P: ClapPlugin> GuiContext for WrapperGuiContext<P> {
                 // (when the plugin isn't processing audio). The parameter's actual value will only
                 // be changed when the output event is written to prevent changing parameter values
                 // in the middle of processing audio.
-                let clap_plain_value = normalized as f64 * param.step_count().unwrap_or(1) as f64;
+                let clap_plain_value = match param.step_count() {
+                    Some(step_count) => normalized as f64 * step_count as f64,
+                    None => param.preview_plain(normalized) as f64,
+                };
                 let success = self
                     .wrapper
                     .queue_parameter_event(OutputParamEvent::SetValue {
@@ -239,6 +272,16 @@ impl<P: ClapPlugin> GuiContext for WrapperGuiContext<P> {
 
     fn set_state(&self, state: crate::wrapper::state::PluginState) {
         self.wrapper.set_state_object_from_gui(state)
+    }
+
+    fn rescan_param_info(&self) {
+        let task_posted = self.wrapper.schedule_gui(Task::RescanParamInfo);
+        nih_debug_assert!(task_posted, "Task queue full, param info rescan not sent");
+    }
+
+    fn rescan_param_all(&self) {
+        let task_posted = self.wrapper.schedule_gui(Task::RescanParamAll);
+        nih_debug_assert!(task_posted, "Task queue full, param rescan-all not sent");
     }
 }
 
