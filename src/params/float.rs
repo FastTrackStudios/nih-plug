@@ -3,7 +3,7 @@
 use atomic_float::AtomicF32;
 use std::fmt::{Debug, Display};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::internals::ParamPtr;
 use super::range::FloatRange;
@@ -53,6 +53,9 @@ pub struct FloatParam {
     step_size: Option<f32>,
     /// The parameter's human readable display name.
     name: String,
+    /// Optional runtime name override. When set, `name()` returns this instead of `name`.
+    /// Use `set_display_name()` / `clear_display_name()` to manage this.
+    display_name: Mutex<Option<String>>,
     /// The parameter value's unit, added after [`value_to_string`][Self::value_to_string] if that
     /// is set. NIH-plug will not automatically add a space before the unit.
     unit: &'static str,
@@ -105,6 +108,13 @@ impl Param for FloatParam {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn effective_name(&self) -> String {
+        match self.display_name.lock().unwrap().as_ref() {
+            Some(display) => display.clone(),
+            None => self.name.clone(),
+        }
     }
 
     fn unit(&self) -> &'static str {
@@ -286,6 +296,7 @@ impl FloatParam {
             range,
             step_size: None,
             name: name.into(),
+            display_name: Mutex::new(None),
             unit: "",
             poly_modulation_id: None,
             value_to_string: None,
@@ -417,6 +428,28 @@ impl FloatParam {
     pub fn hide_in_generic_ui(mut self) -> Self {
         self.flags.insert(ParamFlags::HIDE_IN_GENERIC_UI);
         self
+    }
+
+    /// Set a runtime display name override. After calling this and requesting a parameter
+    /// info rescan from the host, the host will show this name instead of the original.
+    ///
+    /// Call [`clear_display_name()`][Self::clear_display_name()] to revert to the original name.
+    pub fn set_display_name(&self, name: impl Into<String>) {
+        *self.display_name.lock().unwrap() = Some(name.into());
+    }
+
+    /// Clear the runtime display name override, reverting to the original name.
+    pub fn clear_display_name(&self) {
+        *self.display_name.lock().unwrap() = None;
+    }
+
+    /// Get the display name if set, otherwise the original name. Returns an owned `String`
+    /// because the display name is behind a mutex.
+    pub fn effective_name(&self) -> String {
+        match self.display_name.lock().unwrap().as_ref() {
+            Some(display) => display.clone(),
+            None => self.name.clone(),
+        }
     }
 }
 

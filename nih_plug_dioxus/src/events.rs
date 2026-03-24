@@ -12,15 +12,21 @@ pub use keyboard_types::Modifiers;
 type BlitzModifiers = dioxus_native::prelude::Modifiers;
 
 /// Translate a baseview event to a blitz UiEvent.
+///
+/// `viewport_size` is `(width, height)` in physical pixels. When a mouse button
+/// is held (drag in progress), coordinates are clamped to the viewport so that
+/// Blitz hit-testing still finds the overlay element even when the OS cursor is
+/// outside the plugin window.
 pub fn translate_event(
     event: &Event,
     mouse_pos: &mut (f32, f32),
     mouse_buttons: &mut MouseEventButtons,
     modifiers: &mut Modifiers,
+    viewport_size: (u32, u32),
 ) -> Option<UiEvent> {
     match event {
         Event::Mouse(mouse_event) => {
-            translate_mouse_event(mouse_event, mouse_pos, mouse_buttons, modifiers)
+            translate_mouse_event(mouse_event, mouse_pos, mouse_buttons, modifiers, viewport_size)
         }
         // Skip keyboard events for now due to keyboard_types version mismatch
         // between baseview (0.6) and blitz-traits (0.7)
@@ -37,14 +43,30 @@ fn translate_mouse_event(
     mouse_pos: &mut (f32, f32),
     mouse_buttons: &mut MouseEventButtons,
     _modifiers: &Modifiers,
+    viewport_size: (u32, u32),
 ) -> Option<UiEvent> {
+    // When a mouse button is held, clamp coordinates to the viewport so that
+    // Blitz hit-testing still routes the event to the correct element (e.g. a
+    // full-viewport drag overlay). Without this, out-of-bounds coordinates
+    // cause hit() to return None and the drag event is lost.
+    let clamp = |x: f32, y: f32, buttons: &MouseEventButtons| -> (f32, f32) {
+        if buttons.is_empty() {
+            (x, y)
+        } else {
+            let max_x = (viewport_size.0 as f32 - 1.0).max(0.0);
+            let max_y = (viewport_size.1 as f32 - 1.0).max(0.0);
+            (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
+        }
+    };
+
     match event {
         MouseEvent::CursorMoved {
             position,
             modifiers: mods,
         } => {
-            mouse_pos.0 = position.x as f32;
-            mouse_pos.1 = position.y as f32;
+            let (cx, cy) = clamp(position.x as f32, position.y as f32, mouse_buttons);
+            mouse_pos.0 = cx;
+            mouse_pos.1 = cy;
             Some(UiEvent::MouseMove(BlitzMouseButtonEvent {
                 x: mouse_pos.0,
                 y: mouse_pos.1,

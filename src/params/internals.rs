@@ -62,6 +62,7 @@ macro_rules! param_ptr_forward(
 
 impl ParamPtr {
     param_ptr_forward!(pub unsafe fn name(&self) -> &str);
+    param_ptr_forward!(pub unsafe fn effective_name(&self) -> String);
     param_ptr_forward!(pub unsafe fn unit(&self) -> &'static str);
     param_ptr_forward!(pub unsafe fn poly_modulation_id(&self) -> Option<u32>);
     param_ptr_forward!(pub unsafe fn modulated_normalized_value(&self) -> f32);
@@ -74,7 +75,7 @@ impl ParamPtr {
     param_ptr_forward!(pub unsafe fn string_to_normalized_value(&self, string: &str) -> Option<f32>);
     param_ptr_forward!(pub unsafe fn flags(&self) -> ParamFlags);
 
-    param_ptr_forward!(pub(crate) unsafe fn set_normalized_value(&self, normalized: f32) -> bool);
+    param_ptr_forward!(pub unsafe fn set_normalized_value(&self, normalized: f32) -> bool);
     param_ptr_forward!(pub(crate) unsafe fn modulate_value(&self, modulation_offset: f32) -> bool);
     param_ptr_forward!(pub(crate) unsafe fn update_smoother(&self, sample_rate: f32, reset: bool));
 

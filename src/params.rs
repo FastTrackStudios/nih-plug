@@ -80,6 +80,13 @@ pub trait Param: Display + Debug + sealed::Sealed {
     /// Get the human readable name for this parameter.
     fn name(&self) -> &str;
 
+    /// Get the effective display name for this parameter. Returns the runtime display name
+    /// override if set, otherwise the original name. This is used by the CLAP wrapper when
+    /// reporting parameter info to the host.
+    fn effective_name(&self) -> String {
+        self.name().to_string()
+    }
+
     /// Get the unit label for this parameter, if any.
     fn unit(&self) -> &'static str;
 

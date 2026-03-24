@@ -97,6 +97,11 @@ impl<P: Plugin, B: Backend<P>> ProcessContext<P> for WrapperProcessContext<'_, P
     fn set_current_voice_capacity(&self, _capacity: u32) {
         // This is only supported by CLAP
     }
+
+    unsafe fn set_output_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+        // Standalone has no host to report to, just update the internal value
+        param.set_normalized_value(normalized);
+    }
 }
 
 impl<P: Plugin, B: Backend<P>> GuiContext for WrapperGuiContext<P, B> {

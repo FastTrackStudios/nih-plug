@@ -1,6 +1,7 @@
 //! A context passed during the process function.
 
 use super::PluginApi;
+use crate::params::internals::ParamPtr;
 use crate::prelude::{Plugin, PluginNoteEvent};
 
 /// Contains both context data and callbacks the plugin can use during processing. Most notably this
@@ -92,10 +93,14 @@ pub trait ProcessContext<P: Plugin> {
     /// monophonic modulation when dropping the capacity down to 1.
     fn set_current_voice_capacity(&self, capacity: u32);
 
-    // TODO: Add this, this works similar to [GuiContext::set_parameter] but it adds the parameter
-    //       change to a queue (or directly to the VST3 plugin's parameter output queues) instead of
-    //       using main thread host automation (and all the locks involved there).
-    // fn set_parameter<P: Param>(&self, param: &P, value: P::Plain);
+    /// Set the normalized value of an output parameter and notify the host. This is meant for
+    /// read-only output parameters like gain reduction meters. The value change is queued and
+    /// sent to the host as part of the process output events.
+    ///
+    /// # Safety
+    ///
+    /// The `param` pointer must be valid and point to a parameter that is part of this plugin.
+    unsafe fn set_output_parameter_normalized(&self, param: ParamPtr, normalized: f32);
 }
 
 /// Information about the plugin's transport. Depending on the plugin API and the host not all

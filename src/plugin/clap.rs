@@ -25,6 +25,15 @@ pub trait ClapPlugin: Plugin {
     /// that the host can use to provide better hardware mapping for a plugin. See the linked
     /// extension for more information.
     fn remote_controls(&self, context: &mut impl RemoteControlsContext) {}
+
+    /// Return the current gain adjustment in dB for host metering via the
+    /// `clap.gain-adjustment-metering/0` extension. Negative values indicate gain reduction
+    /// (compressor/limiter), positive values indicate expansion. Return 0.0 for no adjustment.
+    ///
+    /// Called on the audio thread after `process()`.
+    fn gain_adjustment_db(&self) -> f64 {
+        0.0
+    }
 }
 
 /// Configuration for the plugin's polyphonic modulation options, if it supports .

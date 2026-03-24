@@ -290,7 +290,12 @@ impl WindowHandler for DioxusSoftbufferWindowHandler {
             }
         }
 
-        // Check for pending resize request from the UI (UI provides LOGICAL size)
+        // Check for pending resize request from the UI (UI provides LOGICAL size).
+        // We only issue the resize request here — the actual width/height, viewport,
+        // and wgpu state are updated when the Resized event arrives from the window
+        // system (ConfigureNotify on X11). Updating eagerly would cause the renderer
+        // to draw at a size that doesn't match the actual window, resulting in black
+        // regions or clipped content.
         if let Some((new_logical_width, new_logical_height)) =
             self.dioxus_state.take_pending_resize()
         {
@@ -314,28 +319,48 @@ impl WindowHandler for DioxusSoftbufferWindowHandler {
                     new_logical_height
                 );
             } else {
-                // Resize the window (baseview takes logical size)
+                // Request the window resize (async — X11 will send ConfigureNotify)
                 window.resize(baseview::Size::new(
                     new_logical_width as f64,
                     new_logical_height as f64,
                 ));
 
-                // Calculate physical size
-                let new_physical_width = (new_logical_width as f32 * self.scale_factor) as u32;
-                let new_physical_height = (new_logical_height as f32 * self.scale_factor) as u32;
-
-                // Update our tracked PHYSICAL size
-                self.width = new_physical_width;
-                self.height = new_physical_height;
-
-                // Update the stored size in DioxusState (logical for persistence)
+                // Store logical size for persistence / host query
                 self.dioxus_state
                     .set_size(new_logical_width, new_logical_height);
 
                 // Notify the host that the window size changed
                 self.gui_context.request_resize();
+            }
+        }
 
-                // Update document viewport with PHYSICAL size
+        // Check for host-driven resize (e.g. user dragging the plugin window border
+        // in the DAW). The host already knows the new size, so do NOT call
+        // gui_context.request_resize() — that would create an infinite loop.
+        if let Some((new_logical_width, new_logical_height)) =
+            self.dioxus_state.take_pending_host_resize()
+        {
+            if new_logical_width >= 100
+                && new_logical_height >= 100
+                && new_logical_width <= 4096
+                && new_logical_height <= 4096
+            {
+                let new_physical_width =
+                    (new_logical_width as f32 * self.scale_factor) as u32;
+                let new_physical_height =
+                    (new_logical_height as f32 * self.scale_factor) as u32;
+
+                window.resize(baseview::Size::new(
+                    new_logical_width as f64,
+                    new_logical_height as f64,
+                ));
+
+                self.width = new_physical_width;
+                self.height = new_physical_height;
+
+                self.dioxus_state
+                    .set_size(new_logical_width, new_logical_height);
+
                 if let Some(doc) = &mut self.dioxus_doc {
                     doc.inner_mut().set_viewport(Viewport::new(
                         new_physical_width,
@@ -345,7 +370,6 @@ impl WindowHandler for DioxusSoftbufferWindowHandler {
                     ));
                 }
 
-                // Resize wgpu offscreen state with physical size
                 if let Some(wgpu_state) = &mut self.wgpu_state {
                     wgpu_state.resize(new_physical_width, new_physical_height);
                 }
@@ -391,10 +415,23 @@ impl WindowHandler for DioxusSoftbufferWindowHandler {
             }
         }
 
+        // Force ALL scopes to re-render every frame so metering/viz data
+        // (read from atomics) stays up to date. We must mark all scopes
+        // because ScopeId::ROOT is a RootScopeWrapper whose children are
+        // memoized (SuspenseBoundary/ErrorBoundary), so marking only ROOT
+        // doesn't propagate to the actual App component.
+        doc.vdom.mark_all_dirty();
+
         // Poll the virtual DOM
         let waker = futures_util::task::waker(Arc::new(RedrawWaker(needs_redraw.clone())));
         let cx = std::task::Context::from_waker(&waker);
-        doc.poll(Some(cx));
+        let did_render = doc.poll(Some(cx));
+
+        static POLL_LOG_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = POLL_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+        if count % 300 == 0 {
+            nih_plug::nih_log!("[Softbuffer] poll={} frame={}", did_render, count);
+        }
 
         // Resolve layout
         doc.inner_mut().resolve(animation_time);
@@ -482,6 +519,7 @@ impl WindowHandler for DioxusSoftbufferWindowHandler {
                 &mut self.mouse_pos,
                 &mut self.mouse_buttons,
                 &mut self.modifiers,
+                (self.width, self.height),
             ) {
                 doc.handle_ui_event(ui_event);
                 self.needs_redraw.store(true, Ordering::Relaxed);

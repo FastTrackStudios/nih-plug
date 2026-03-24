@@ -63,6 +63,23 @@ pub trait GuiContext: Send + Sync + 'static {
     /// host. If the plugin is currently processing audio, then the parameter values will be
     /// restored at the end of the current processing cycle.
     fn set_state(&self, state: PluginState);
+
+    /// Request the host to rescan parameter info. Use this after changing parameter display names,
+    /// module paths, or visibility. The host will re-query `get_info()` for all parameters.
+    ///
+    /// This corresponds to `CLAP_PARAM_RESCAN_INFO` and can be called at any time.
+    fn rescan_param_info(&self) {
+        // Default no-op for hosts/wrappers that don't support this
+    }
+
+    /// Request the host to fully rescan all parameters, including structural changes like
+    /// adding/removing parameters or changing ranges and step counts.
+    ///
+    /// This corresponds to `CLAP_PARAM_RESCAN_ALL` and requires a plugin restart cycle
+    /// (deactivate → rescan → activate). The host will call `request_restart()` automatically.
+    fn rescan_param_all(&self) {
+        // Default no-op for hosts/wrappers that don't support this
+    }
 }
 
 /// An way to run background tasks from the plugin's GUI, equivalent to the

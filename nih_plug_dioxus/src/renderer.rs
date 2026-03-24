@@ -103,6 +103,11 @@ impl Renderer {
         width: u32,
         height: u32,
     ) {
+        // Don't attempt to render if the surface was never configured
+        if !wgpu_state.is_configured() {
+            return;
+        }
+
         // Get the next frame
         let frame = match wgpu_state.surface.get_current_texture() {
             Ok(frame) => frame,

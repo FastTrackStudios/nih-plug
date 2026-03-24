@@ -361,7 +361,11 @@ impl WindowHandler for DioxusWindowHandler {
             }
         }
 
-        // Check for pending resize request from the UI (UI provides LOGICAL size)
+        // Check for pending resize request from the UI (UI provides LOGICAL size).
+        // We only issue the resize request here — the actual width/height, viewport,
+        // and wgpu state are updated when the Resized event arrives from the window
+        // system (ConfigureNotify on X11). Updating eagerly would cause the renderer
+        // to draw at a size that doesn't match the actual window.
         if let Some((new_logical_width, new_logical_height)) =
             self.dioxus_state.take_pending_resize()
         {
@@ -385,43 +389,18 @@ impl WindowHandler for DioxusWindowHandler {
                     new_logical_height
                 );
             } else {
-                // Resize the window (baseview takes logical size)
+                // Request the window resize (async — X11 will send ConfigureNotify)
                 window.resize(baseview::Size::new(
                     new_logical_width as f64,
                     new_logical_height as f64,
                 ));
 
-                // Calculate physical size
-                let new_physical_width = (new_logical_width as f32 * self.scale_factor) as u32;
-                let new_physical_height = (new_logical_height as f32 * self.scale_factor) as u32;
-
-                // Update our tracked PHYSICAL size
-                self.width = new_physical_width;
-                self.height = new_physical_height;
-
-                // Update the stored size in DioxusState (logical for persistence)
+                // Store logical size for persistence / host query
                 self.dioxus_state
                     .set_size(new_logical_width, new_logical_height);
 
                 // Notify the host that the window size changed
                 self.gui_context.request_resize();
-
-                // Update document viewport with PHYSICAL size
-                if let Some(doc) = &mut self.dioxus_doc {
-                    doc.inner_mut().set_viewport(Viewport::new(
-                        new_physical_width,
-                        new_physical_height,
-                        self.scale_factor,
-                        ColorScheme::Light,
-                    ));
-                }
-
-                // Resize wgpu surface with physical size
-                if let Some(wgpu_state) = &mut self.wgpu_state {
-                    wgpu_state.resize(new_physical_width, new_physical_height);
-                }
-
-                self.needs_redraw.store(true, Ordering::Relaxed);
             }
         }
 
@@ -508,6 +487,10 @@ impl WindowHandler for DioxusWindowHandler {
         // Create a waker that triggers redraw
         let waker = futures_util::task::waker(Arc::new(RedrawWaker(needs_redraw.clone())));
 
+        // Force ALL scopes to re-render every frame so metering/viz data
+        // (read from atomics) stays up to date.
+        doc.vdom.mark_all_dirty();
+
         // Poll the virtual DOM
         let cx = std::task::Context::from_waker(&waker);
         doc.poll(Some(cx));
@@ -593,6 +576,7 @@ impl WindowHandler for DioxusWindowHandler {
                 &mut self.mouse_pos,
                 &mut self.mouse_buttons,
                 &mut self.modifiers,
+                (self.width, self.height),
             ) {
                 // Debug log for mouse events with hit testing info
                 match &ui_event {

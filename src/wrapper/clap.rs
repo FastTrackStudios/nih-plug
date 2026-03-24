@@ -4,6 +4,7 @@ mod util;
 mod context;
 mod descriptor;
 pub mod features;
+pub mod gain_adjustment;
 pub mod reaper_embed;
 mod wrapper;
 

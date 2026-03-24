@@ -138,6 +138,7 @@ mod events;
 mod hot_reload;
 mod renderer;
 mod state;
+pub mod standalone;
 mod wgpu_state;
 #[cfg(feature = "softbuffer-blit")]
 mod wgpu_offscreen;
@@ -146,6 +147,7 @@ mod window;
 mod window_softbuffer;
 
 pub use context::{ParamContext, use_param, use_param_context, use_param_normalized};
+pub use standalone::{open_standalone, open_standalone_with_state};
 pub use state::DioxusState;
 
 /// Compiled Tailwind CSS with shadcn/lumen-blocks theme variables.

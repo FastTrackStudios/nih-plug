@@ -116,6 +116,12 @@ impl<P: Vst3Plugin> ProcessContext<P> for WrapperProcessContext<'_, P> {
     fn set_current_voice_capacity(&self, _capacity: u32) {
         // This is only supported by CLAP
     }
+
+    unsafe fn set_output_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+        // For VST3, just update the internal value. VST3 output parameter reporting
+        // would need IParameterChanges output queue support, which is not implemented yet.
+        param.set_normalized_value(normalized);
+    }
 }
 
 impl<P: Vst3Plugin> GuiContext for WrapperGuiContext<P> {

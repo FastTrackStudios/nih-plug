@@ -14,6 +14,8 @@ pub struct WgpuState {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub config: wgpu::SurfaceConfiguration,
+    /// Whether the surface was successfully configured for presentation.
+    configured: bool,
 }
 
 impl WgpuState {
@@ -140,38 +142,40 @@ impl WgpuState {
         nih_plug::nih_log!("[WGPU] Configuring surface: {}x{}, format={:?}, alpha={:?}, present={:?}",
             config.width, config.height, config.format, config.alpha_mode, config.present_mode);
 
-        // On Linux/XWayland, surface configuration can fail due to timing issues
-        // or XWayland compatibility problems. We'll try a few times with a small delay.
+        // On Linux/X11, the window may not be fully mapped when baseview fires
+        // the first on_frame. Retry surface configuration with increasing delays.
+        let mut configured = false;
         #[cfg(target_os = "linux")]
         {
             let mut attempts = 0;
-            const MAX_ATTEMPTS: u32 = 3;
+            const MAX_ATTEMPTS: u32 = 10;
             loop {
-                // Try to configure - this pushes errors to the device's error scope
                 device.push_error_scope(wgpu::ErrorFilter::Validation);
                 surface.configure(&device, &config);
 
                 let error = device.pop_error_scope().block_on();
                 if error.is_none() {
                     nih_plug::nih_log!("[WGPU] Surface configured successfully on attempt {}", attempts + 1);
+                    configured = true;
                     break;
                 }
 
                 attempts += 1;
                 if attempts >= MAX_ATTEMPTS {
-                    nih_plug::nih_error!("[WGPU] Surface configuration failed after {} attempts: {:?}", attempts, error);
-                    // Try one more time without error scope - let it panic if it still fails
-                    surface.configure(&device, &config);
+                    nih_plug::nih_error!("[WGPU] Surface configuration failed after {} attempts: {:?}. GUI will not render.", attempts, error);
                     break;
                 }
 
-                nih_plug::nih_warn!("[WGPU] Surface configuration attempt {} failed, retrying...", attempts);
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                nih_plug::nih_warn!("[WGPU] Surface configuration attempt {} failed, retrying in {}ms...", attempts, attempts * 100);
+                std::thread::sleep(std::time::Duration::from_millis(attempts as u64 * 100));
             }
         }
 
         #[cfg(not(target_os = "linux"))]
-        surface.configure(&device, &config);
+        {
+            surface.configure(&device, &config);
+            configured = true;
+        }
 
         Self {
             instance,
@@ -179,7 +183,13 @@ impl WgpuState {
             device,
             queue,
             config,
+            configured,
         }
+    }
+
+    /// Whether the surface was successfully configured and is ready for rendering.
+    pub fn is_configured(&self) -> bool {
+        self.configured
     }
 
     /// Resize the surface.
