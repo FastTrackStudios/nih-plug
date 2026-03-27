@@ -147,7 +147,7 @@ mod window;
 mod window_softbuffer;
 
 pub use context::{ParamContext, use_param, use_param_context, use_param_normalized};
-pub use standalone::{open_parented_x11, open_standalone, open_standalone_with_state};
+pub use standalone::{open_parented_x11, open_standalone, open_standalone_with_state, render_screenshot};
 pub use state::DioxusState;
 
 /// Compiled Tailwind CSS with shadcn/lumen-blocks theme variables.

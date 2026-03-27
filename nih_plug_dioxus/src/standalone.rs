@@ -1,16 +1,30 @@
 //! Standalone window support for testing Dioxus editors outside a DAW.
 //!
-//! This module provides a way to open a standalone baseview window with the
-//! native wgpu surface rendering path, without requiring a plugin host.
+//! This module provides:
+//! - `open_standalone` / `open_standalone_with_state`: windowed rendering for interactive testing
+//! - `open_parented_x11`: parented X11 window (simulates DAW embedding)
+//! - `render_screenshot`: headless offscreen rendering to RGBA pixels for automated testing
 
+use crate::context::ParamContext;
+use crate::renderer::Renderer;
 use crate::state::DioxusState;
 use crate::SharedState;
+use anyrender_vello::VelloScenePainter;
 use baseview::{Size, Window, WindowOpenOptions, WindowScalePolicy};
-use dioxus_native::prelude::Element;
+use blitz_dom::{Document as _, DocumentConfig};
+use blitz_paint::paint_scene;
+use blitz_traits::shell::{ColorScheme, Viewport};
+use crossbeam::channel::unbounded;
+use dioxus_native::DioxusDocument;
+use dioxus_native::prelude::*;
+use futures_util::task::ArcWake;
 use nih_plug::prelude::{GuiContext, ParamPtr, PluginApi, PluginState};
+use pollster::FutureExt;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicBool;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use vello::{RenderParams, Renderer as VelloRenderer, RendererOptions, Scene, peniko::color::AlphaColor};
 
 /// A no-op GuiContext for standalone testing.
 /// Parameter automation and state are not available outside a DAW.
@@ -161,4 +175,237 @@ pub fn open_parented_x11(
             )
         },
     )
+}
+
+/// Document proxy for headless rendering (same as in window.rs).
+#[derive(Clone)]
+struct HeadlessDocProxy {
+    sender: crossbeam::channel::Sender<(String, Vec<(String, String)>, Option<String>)>,
+}
+
+impl document::Document for HeadlessDocProxy {
+    fn eval(&self, js: String) -> document::Eval {
+        document::NoOpDocument.eval(js)
+    }
+    fn set_title(&self, title: String) {
+        let _ = self.sender.send(("title".into(), vec![], Some(title)));
+    }
+    fn create_meta(&self, props: document::MetaProps) {
+        let _ = self.sender.send(("meta".into(), props.attributes().into_iter().map(|(k, v)| (k.to_string(), v)).collect(), None));
+    }
+    fn create_script(&self, props: document::ScriptProps) {
+        let _ = self.sender.send(("script".into(), props.attributes().into_iter().map(|(k, v)| (k.to_string(), v)).collect(), props.script_contents().ok()));
+    }
+    fn create_style(&self, props: document::StyleProps) {
+        let _ = self.sender.send(("style".into(), props.attributes().into_iter().map(|(k, v)| (k.to_string(), v)).collect(), props.style_contents().ok()));
+    }
+    fn create_link(&self, props: document::LinkProps) {
+        let _ = self.sender.send(("link".into(), props.attributes().into_iter().map(|(k, v)| (k.to_string(), v)).collect(), None));
+    }
+    fn create_head_component(&self) -> bool { true }
+}
+
+struct ScreenshotWaker;
+impl ArcWake for ScreenshotWaker {
+    fn wake_by_ref(_arc_self: &Arc<Self>) {}
+}
+
+/// Render a Dioxus component headlessly and return RGBA pixel data.
+///
+/// This creates an offscreen wgpu device, builds the Dioxus document,
+/// resolves layout, renders via Vello, and reads pixels back.
+/// No window or display connection required.
+///
+/// Returns RGBA8 pixel data (4 bytes per pixel, row-major).
+pub fn render_screenshot(
+    app: fn() -> Element,
+    width: u32,
+    height: u32,
+    shared_state: Option<SharedState>,
+) -> Vec<u8> {
+    let width = width.max(1);
+    let height = height.max(1);
+
+    // --- Create offscreen wgpu device ---
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            ..Default::default()
+        })
+        .block_on()
+        .expect("Failed to find GPU adapter");
+
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("screenshot device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        })
+        .block_on()
+        .expect("Failed to create device");
+
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
+
+    // --- Build the Dioxus document ---
+    let vdom = VirtualDom::new(app);
+
+    let viewport = Viewport::new(width, height, 1.0, ColorScheme::Light);
+    let mut dioxus_doc = DioxusDocument::new(
+        vdom,
+        DocumentConfig {
+            viewport: Some(viewport),
+            ..Default::default()
+        },
+    );
+
+    // Set up contexts
+    let (doc_sender, doc_receiver) = unbounded();
+    let doc_proxy = HeadlessDocProxy { sender: doc_sender };
+    let doc_proxy_rc = Rc::new(doc_proxy);
+
+    let gui_context: Arc<dyn GuiContext> = Arc::new(StandaloneGuiContext);
+    let needs_redraw = Arc::new(AtomicBool::new(false));
+    let param_context = ParamContext::new(gui_context, needs_redraw);
+    let dioxus_state = DioxusState::new(move || (width, height));
+
+    dioxus_doc.vdom.in_scope(ScopeId::ROOT, move || {
+        provide_context(doc_proxy_rc as Rc<dyn document::Document>);
+        provide_context(param_context);
+        provide_context(dioxus_state);
+        if let Some(state) = shared_state {
+            provide_context(state);
+        }
+    });
+
+    // Build and process document messages (CSS injection)
+    dioxus_doc.initial_build();
+    while let Ok((name, attrs, contents)) = doc_receiver.try_recv() {
+        dioxus_doc.create_head_element(&name, &attrs, &contents);
+    }
+
+    // Poll VirtualDom and resolve layout
+    let waker = futures_util::task::waker(Arc::new(ScreenshotWaker));
+    let cx = std::task::Context::from_waker(&waker);
+    dioxus_doc.poll(Some(cx));
+    dioxus_doc.inner_mut().resolve(0.0);
+
+    // --- Render via Vello ---
+    let mut vello_renderer = VelloRenderer::new(
+        &device,
+        RendererOptions {
+            use_cpu: false,
+            antialiasing_support: vello::AaSupport::all(),
+            num_init_threads: None,
+            pipeline_cache: None,
+        },
+    )
+    .expect("Failed to create Vello renderer");
+
+    let mut scene = Scene::new();
+    paint_scene(
+        &mut VelloScenePainter::new(&mut scene),
+        &*dioxus_doc.inner(),
+        1.0, // scale
+        width,
+        height,
+    );
+
+    // Vello renders to Rgba8Unorm (required for compute shaders)
+    let target_format = wgpu::TextureFormat::Rgba8Unorm;
+    let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("screenshot target"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: target_format,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    vello_renderer
+        .render_to_texture(
+            &device,
+            &queue,
+            &scene,
+            &target_view,
+            &RenderParams {
+                base_color: AlphaColor::TRANSPARENT,
+                width,
+                height,
+                antialiasing_method: vello::AaConfig::Msaa16,
+            },
+        )
+        .expect("Vello render failed");
+
+    // --- Read back pixels ---
+    let bytes_per_pixel = 4u32;
+    let unpadded_bpr = width * bytes_per_pixel;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bpr = (unpadded_bpr + align - 1) / align * align;
+
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("screenshot staging"),
+        size: (padded_bpr * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("screenshot readback"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bpr),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+    let _ = device.poll(wgpu::PollType::wait());
+    rx.recv().unwrap().unwrap();
+
+    let data = slice.get_mapped_range();
+    let result = if padded_bpr != unpadded_bpr {
+        let mut out = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            let start = (y * padded_bpr) as usize;
+            let end = start + unpadded_bpr as usize;
+            out.extend_from_slice(&data[start..end]);
+        }
+        out
+    } else {
+        data.to_vec()
+    };
+
+    drop(data);
+    staging.unmap();
+
+    result
 }
