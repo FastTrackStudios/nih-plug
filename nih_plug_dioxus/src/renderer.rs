@@ -1,5 +1,6 @@
 //! Vello renderer integration.
 
+use crate::custom_paint::OverlayRegistry;
 use crate::wgpu_state::WgpuState;
 #[cfg(feature = "softbuffer-blit")]
 use crate::wgpu_offscreen::WgpuOffscreenState;
@@ -12,6 +13,19 @@ use vello::{
 };
 use wgpu::util::TextureBlitter;
 
+/// A scene overlay that gets composited on top of the Dioxus DOM scene.
+///
+/// Paint sources produce vello `Scene` content each frame. The renderer appends these
+/// to the main scene after Dioxus DOM painting, allowing GPU-rendered content
+/// (like EQ graphs, spectrum analyzers) to appear within the Dioxus layout.
+pub trait SceneOverlay: 'static {
+    /// Paint the overlay into the given scene.
+    /// Called each frame. The scene is empty on entry; append your content.
+    /// `width` and `height` are the full window size in physical pixels.
+    /// `scale` is the display scale factor.
+    fn paint(&mut self, scene: &mut Scene, width: u32, height: u32, scale: f64);
+}
+
 /// Manages Vello rendering to a wgpu surface.
 pub struct Renderer {
     vello_renderer: VelloRenderer,
@@ -23,6 +37,9 @@ pub struct Renderer {
     blitter: Option<TextureBlitter>,
     last_width: u32,
     last_height: u32,
+    /// Shared overlay registry — also provided as Dioxus context for `use_scene_overlay`.
+    overlay_registry: OverlayRegistry,
+    overlay_scene: Scene,
 }
 
 impl Renderer {
@@ -47,7 +64,14 @@ impl Renderer {
             blitter: None,
             last_width: 0,
             last_height: 0,
+            overlay_registry: OverlayRegistry::new(),
+            overlay_scene: Scene::new(),
         }
+    }
+
+    /// Get a clone of the overlay registry for providing as Dioxus context.
+    pub fn overlay_registry(&self) -> OverlayRegistry {
+        self.overlay_registry.clone()
     }
 
     /// Ensure the intermediate texture is the right size.
@@ -59,9 +83,6 @@ impl Renderer {
         height: u32,
     ) {
         if self.last_width != width || self.last_height != height || self.target_texture.is_none() {
-            // Create intermediate texture for vello (compute shader output)
-            // Vello requires Rgba8Unorm with STORAGE_BINDING for its compute shaders.
-            // The blitter will handle any necessary format conversion when copying to the surface.
             let target_texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("vello target"),
                 size: wgpu::Extent3d {
@@ -77,13 +98,7 @@ impl Renderer {
                 view_formats: &[],
             });
 
-            // View for Vello to render into (must be linear Rgba8Unorm for compute shader)
             let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-            // Create blitter to copy from intermediate to surface
-            // Note: TextureBlitter does a simple copy without gamma correction.
-            // Since we're using a non-sRGB surface format (selected in wgpu_state.rs),
-            // the colors will be interpreted as linear, which matches Vello's output.
             let blitter = TextureBlitter::new(device, surface_format);
 
             self.target_texture = Some(target_texture);
@@ -103,31 +118,25 @@ impl Renderer {
         width: u32,
         height: u32,
     ) {
-        // Don't attempt to render if the surface was never configured
         if !wgpu_state.is_configured() {
             return;
         }
 
-        // Get the next frame
         let frame = match wgpu_state.surface.get_current_texture() {
             Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Outdated) => {
-                // Surface is outdated, skip this frame
-                return;
-            }
+            Err(wgpu::SurfaceError::Outdated) => return,
             Err(e) => {
                 eprintln!("Failed to get next frame: {:?}", e);
                 return;
             }
         };
 
-        // Ensure we have the right sized intermediate texture
         self.ensure_target(&wgpu_state.device, wgpu_state.format(), width, height);
 
         let target_view = self.target_view.as_ref().expect("Target view not created");
         let blitter = self.blitter.as_ref().expect("Blitter not created");
 
-        // Clear and paint the scene
+        // Paint the Dioxus DOM
         self.scene.reset();
         paint_scene(
             &mut VelloScenePainter::new(&mut self.scene),
@@ -137,7 +146,13 @@ impl Renderer {
             height,
         );
 
-        // Render to the intermediate texture (using linear view for Vello compute shader)
+        // Append scene overlays (GPU-rendered content like EQ graphs)
+        self.overlay_scene.reset();
+        self.overlay_registry
+            .paint_all(&mut self.overlay_scene, width, height, scale as f64);
+        self.scene.append(&self.overlay_scene, None);
+
+        // Render to intermediate texture
         self.vello_renderer
             .render_to_texture(
                 &wgpu_state.device,
@@ -145,7 +160,6 @@ impl Renderer {
                 &self.scene,
                 target_view,
                 &RenderParams {
-                    // Transparent background - let CSS provide the actual background color
                     base_color: AlphaColor::TRANSPARENT,
                     width,
                     height,
@@ -154,7 +168,7 @@ impl Renderer {
             )
             .expect("Failed to render");
 
-        // Blit from intermediate texture to surface
+        // Blit to surface
         let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -182,13 +196,11 @@ impl Renderer {
         width: u32,
         height: u32,
     ) {
-        // Ensure we have the right sized intermediate texture
         self.ensure_target(&wgpu_state.device, wgpu_state.format(), width, height);
 
         let target_view = self.target_view.as_ref().expect("Target view not created");
         let blitter = self.blitter.as_ref().expect("Blitter not created");
 
-        // Clear and paint the scene
         self.scene.reset();
         paint_scene(
             &mut VelloScenePainter::new(&mut self.scene),
@@ -198,7 +210,12 @@ impl Renderer {
             height,
         );
 
-        // Render to the intermediate texture (using linear view for Vello compute shader)
+        // Append scene overlays
+        self.overlay_scene.reset();
+        self.overlay_registry
+            .paint_all(&mut self.overlay_scene, width, height, scale as f64);
+        self.scene.append(&self.overlay_scene, None);
+
         self.vello_renderer
             .render_to_texture(
                 &wgpu_state.device,
@@ -206,7 +223,6 @@ impl Renderer {
                 &self.scene,
                 target_view,
                 &RenderParams {
-                    // Transparent background - let CSS provide the actual background color
                     base_color: AlphaColor::TRANSPARENT,
                     width,
                     height,
@@ -215,7 +231,6 @@ impl Renderer {
             )
             .expect("Failed to render");
 
-        // Blit from intermediate texture to offscreen render texture
         let mut encoder =
             wgpu_state
                 .device
@@ -223,7 +238,12 @@ impl Renderer {
                     label: Some("offscreen blit encoder"),
                 });
 
-        blitter.copy(&wgpu_state.device, &mut encoder, target_view, &wgpu_state.render_texture_view);
+        blitter.copy(
+            &wgpu_state.device,
+            &mut encoder,
+            target_view,
+            &wgpu_state.render_texture_view,
+        );
 
         wgpu_state.queue.submit(std::iter::once(encoder.finish()));
     }

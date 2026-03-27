@@ -204,6 +204,7 @@ impl DioxusSoftbufferWindowHandler {
 
         // Create renderer
         let renderer = Renderer::new(&wgpu_state.device);
+        let overlay_registry = renderer.overlay_registry();
 
         // Create the Dioxus virtual DOM
         let vdom = VirtualDom::new(self.app);
@@ -240,6 +241,7 @@ impl DioxusSoftbufferWindowHandler {
             provide_context(doc_proxy_rc as Rc<dyn document::Document>);
             provide_context(param_context);
             provide_context(dioxus_state_for_context);
+            provide_context(overlay_registry);
 
             if let Some(state) = shared_state {
                 provide_context(state);

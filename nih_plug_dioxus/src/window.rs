@@ -255,6 +255,7 @@ impl DioxusWindowHandler {
 
         // Create renderer
         let renderer = Renderer::new(&wgpu_state.device);
+        let overlay_registry = renderer.overlay_registry();
 
         // Create the Dioxus virtual DOM
         let vdom = VirtualDom::new(self.app);
@@ -302,6 +303,9 @@ impl DioxusWindowHandler {
 
             // Inject DioxusState so ResizeHandle can access it
             provide_context(dioxus_state_for_context);
+
+            // Provide OverlayRegistry for use_scene_overlay hook
+            provide_context(overlay_registry);
 
             // Inject shared state if provided
             if let Some(state) = shared_state {

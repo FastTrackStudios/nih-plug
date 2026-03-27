@@ -187,7 +187,7 @@ pub mod prelude {
     pub use crate::create_dioxus_editor;
     pub use crate::create_dioxus_editor_with_state;
     pub use crate::custom_paint::{
-        CustomPaintCtx, CustomPaintSource, DeviceHandle, TextureHandle, use_wgpu,
+        OverlayHandle, OverlayRegistry, SceneOverlay, use_scene_overlay, vello,
     };
     #[cfg(feature = "embedded")]
     pub use crate::embedded::DioxusEmbeddedEditor;
