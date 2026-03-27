@@ -98,3 +98,67 @@ pub fn open_standalone_with_state(
         },
     );
 }
+
+/// Open a Dioxus component as a child of an existing X11 window.
+///
+/// This simulates exactly what a DAW does: provide a parent window ID and
+/// the plugin opens its GUI as a child window inside it. Uses the same
+/// `open_parented` + `RwhAdapter` code path as `DioxusEditor::spawn`.
+pub fn open_parented_x11(
+    app: fn() -> Element,
+    parent_window_id: u32,
+    width: u32,
+    height: u32,
+) -> baseview::WindowHandle {
+    use crate::window::DioxusWindowHandler;
+    use raw_window_handle::{
+        HandleError, HasDisplayHandle, HasWindowHandle,
+        RawDisplayHandle, RawWindowHandle, XcbDisplayHandle, XcbWindowHandle,
+    };
+    use std::num::NonZeroU32;
+
+    struct X11Parent(u32);
+
+    impl HasWindowHandle for X11Parent {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, HandleError> {
+            let handle = XcbWindowHandle::new(
+                NonZeroU32::new(self.0).expect("X11 window ID should not be 0"),
+            );
+            let raw = RawWindowHandle::Xcb(handle);
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+        }
+    }
+
+    impl HasDisplayHandle for X11Parent {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, HandleError> {
+            // No display connection — same as what nih-plug provides from DAWs.
+            // Baseview creates its own X11 connection internally.
+            let handle = XcbDisplayHandle::new(None, 0);
+            let raw = RawDisplayHandle::Xcb(handle);
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw) })
+        }
+    }
+
+    let dioxus_state = DioxusState::new(move || (width, height));
+    let gui_context: Arc<dyn GuiContext> = Arc::new(StandaloneGuiContext);
+    let needs_redraw = Arc::new(AtomicBool::new(true));
+
+    Window::open_parented(
+        &X11Parent(parent_window_id),
+        WindowOpenOptions {
+            title: String::from("Plugin Editor (Parented Test)"),
+            size: Size::new(width as f64, height as f64),
+            scale: WindowScalePolicy::ScaleFactor(1.0),
+        },
+        move |window| {
+            DioxusWindowHandler::new_with_state(
+                window,
+                app,
+                gui_context.clone(),
+                dioxus_state.clone(),
+                needs_redraw.clone(),
+                None,
+            )
+        },
+    )
+}
