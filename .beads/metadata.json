@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "nih_plug",
+  "project_id": "a4dd340a-3e95-4943-9a05-50fc77a625c2"
+}
