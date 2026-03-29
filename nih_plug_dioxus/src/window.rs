@@ -461,9 +461,16 @@ impl WindowHandler for DioxusWindowHandler {
         let Some(doc) = &mut self.dioxus_doc else {
             return;
         };
-        let Some(wgpu_state) = &self.wgpu_state else {
+        let Some(wgpu_state) = &mut self.wgpu_state else {
             return;
         };
+        // If configure failed during init, retry each frame (non-blocking).
+        // The X11 event loop runs normally between frames so Vulkan gets the
+        // events it needs to successfully create the swapchain.
+        if !wgpu_state.try_configure() {
+            return;
+        }
+        let wgpu_state = &*wgpu_state;
         let Some(renderer) = &mut self.renderer else {
             return;
         };
