@@ -30,9 +30,13 @@ impl WgpuState {
         width: u32,
         height: u32,
     ) -> Self {
-        // Create the instance - use Vulkan on Linux
+        // On Linux, use OpenGL (EGL) rather than Vulkan.
+        // Vulkan Xlib/XCB surfaces fail to create swapchains for embedded plugin
+        // windows (host-provided X11 visuals are incompatible with Vulkan swapchain
+        // requirements). EGL works with any X11 window visual and is still full GPU
+        // rendering — Vello renders identically, no CPU blit involved.
         #[cfg(target_os = "linux")]
-        let backends = wgpu::Backends::VULKAN;
+        let backends = wgpu::Backends::GL;
         #[cfg(not(target_os = "linux"))]
         let backends = wgpu::Backends::all();
 
@@ -87,15 +91,16 @@ impl WgpuState {
         // converted to linear RGB by the rendering pipeline (Blitz/Vello).
         let surface_caps = surface.get_capabilities(&adapter);
 
-        // Debug: log adapter and surface capabilities
-        nih_plug::nih_log!("[WGPU] Adapter: {:?}", adapter.get_info());
-        nih_plug::nih_log!("[WGPU] Adapter supports surface: {}", adapter.is_surface_supported(&surface));
-        nih_plug::nih_log!("[WGPU] Surface formats: {:?}", surface_caps.formats);
-        nih_plug::nih_log!("[WGPU] Surface alpha modes: {:?}", surface_caps.alpha_modes);
-        nih_plug::nih_log!("[WGPU] Surface present modes: {:?}", surface_caps.present_modes);
+        // Debug: log adapter and surface capabilities (eprintln so output
+        // bypasses the nih_plug logger and always appears in REAPER's stderr log)
+        eprintln!("[WGPU] Adapter: {:?}", adapter.get_info());
+        eprintln!("[WGPU] Adapter supports surface: {}", adapter.is_surface_supported(&surface));
+        eprintln!("[WGPU] Surface formats: {:?}", surface_caps.formats);
+        eprintln!("[WGPU] Surface alpha modes: {:?}", surface_caps.alpha_modes);
+        eprintln!("[WGPU] Surface present modes: {:?}", surface_caps.present_modes);
 
         if surface_caps.formats.is_empty() {
-            nih_plug::nih_error!("[WGPU] No surface formats available - surface may be invalid");
+            eprintln!("[WGPU] ERROR: No surface formats available - surface may be invalid");
         }
 
         let format = surface_caps
@@ -139,42 +144,14 @@ impl WgpuState {
             desired_maximum_frame_latency: 2,
         };
 
-        nih_plug::nih_log!("[WGPU] Configuring surface: {}x{}, format={:?}, alpha={:?}, present={:?}",
+        eprintln!("[WGPU] Configuring surface: {}x{}, format={:?}, alpha={:?}, present={:?}",
             config.width, config.height, config.format, config.alpha_mode, config.present_mode);
 
-        // On Linux/X11, the window may not be fully mapped when baseview fires
-        // the first on_frame. Retry surface configuration with increasing delays.
-        let mut configured = false;
-        #[cfg(target_os = "linux")]
-        {
-            let mut attempts = 0;
-            const MAX_ATTEMPTS: u32 = 10;
-            loop {
-                device.push_error_scope(wgpu::ErrorFilter::Validation);
-                surface.configure(&device, &config);
-
-                let error = device.pop_error_scope().block_on();
-                if error.is_none() {
-                    nih_plug::nih_log!("[WGPU] Surface configured successfully on attempt {}", attempts + 1);
-                    configured = true;
-                    break;
-                }
-
-                attempts += 1;
-                if attempts >= MAX_ATTEMPTS {
-                    nih_plug::nih_error!("[WGPU] Surface configuration failed after {} attempts: {:?}. GUI will not render.", attempts, error);
-                    break;
-                }
-
-                nih_plug::nih_warn!("[WGPU] Surface configuration attempt {} failed, retrying in {}ms...", attempts, attempts * 100);
-                std::thread::sleep(std::time::Duration::from_millis(attempts as u64 * 100));
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            surface.configure(&device, &config);
-            configured = true;
+        // Attempt an initial configure. May fail if the window isn't fully mapped yet.
+        // We'll retry each frame via try_configure() without blocking.
+        let configured = Self::do_configure(&surface, &device, &config);
+        if configured {
+            eprintln!("[WGPU] Surface configured successfully on first attempt");
         }
 
         Self {
@@ -192,12 +169,45 @@ impl WgpuState {
         self.configured
     }
 
-    /// Resize the surface.
+    /// Try to configure the surface once (non-blocking). Returns true on success.
+    /// Call this each frame until it succeeds — the X11 event loop stays alive
+    /// between frames so Vulkan can process the events it needs.
+    pub fn try_configure(&mut self) -> bool {
+        if self.configured {
+            return true;
+        }
+        self.configured = Self::do_configure(&self.surface, &self.device, &self.config);
+        if self.configured {
+            eprintln!("[WGPU] Surface configured successfully (deferred)");
+        }
+        self.configured
+    }
+
+    /// Resize the surface. No-op if the surface isn't configured yet.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
+        if !self.configured || width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.configured = Self::do_configure(&self.surface, &self.device, &self.config);
+    }
+
+    /// Configure the surface, capturing any validation error via error scope.
+    /// Returns true on success, false on failure (no panic).
+    fn do_configure(
+        surface: &wgpu::Surface<'_>,
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> bool {
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        surface.configure(device, config);
+        let error = device.pop_error_scope().block_on();
+        if let Some(e) = error {
+            eprintln!("[WGPU] Surface configure failed: {:?}", e);
+            false
+        } else {
+            true
         }
     }
 
