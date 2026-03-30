@@ -144,6 +144,15 @@ pub struct DioxusWindowHandler {
     // Whether we've received a resize event with the actual scale factor
     received_resize: bool,
 
+    // FPS tracking
+    fps_frame_count: u32,
+    fps_last_report: Instant,
+    last_frame_start: Instant,
+
+    // DOM update throttling: only run mark_all_dirty+poll+resolve at ~30fps
+    // so the render loop can run at full speed between DOM updates.
+    last_dom_update: Instant,
+
     // Cached window handles for wgpu surface creation (raw-window-handle 0.6 types)
     window_handle: Option<RawWindowHandle>,
     display_handle: Option<RawDisplayHandle>,
@@ -223,6 +232,10 @@ impl DioxusWindowHandler {
             received_resize: false,
             window_handle,
             display_handle,
+            fps_frame_count: 0,
+            fps_last_report: Instant::now(),
+            last_frame_start: Instant::now(),
+            last_dom_update: Instant::now(),
         }
     }
 
@@ -446,6 +459,10 @@ impl WindowHandler for DioxusWindowHandler {
             self.needs_redraw.store(true, Ordering::Relaxed);
         }
 
+        // Measure time since last frame (gap between on_frame calls)
+        let t_gap = self.last_frame_start.elapsed().as_millis();
+        self.last_frame_start = Instant::now();
+
         // Get animation time upfront before any mutable borrows
         let animation_time = self.animation_start.elapsed().as_secs_f64();
         let needs_redraw = self.needs_redraw.clone();
@@ -498,31 +515,44 @@ impl WindowHandler for DioxusWindowHandler {
         // Create a waker that triggers redraw
         let waker = futures_util::task::waker(Arc::new(RedrawWaker(needs_redraw.clone())));
 
-        // Force ALL scopes to re-render every frame so metering/viz data
-        // (read from atomics) stays up to date.
-        doc.vdom.mark_all_dirty();
+        // Throttle DOM update (mark_all_dirty → poll → resolve) to ~30fps.
+        // This prevents Taffy from doing a full flexbox relayout every frame,
+        // which was costing 73-465ms and capping FPS at ~3. Rendering from
+        // the existing layout runs at full frame rate between DOM updates.
+        const DOM_UPDATE_INTERVAL_MS: u128 = 33; // ~30fps
+        let do_dom_update = self.last_dom_update.elapsed().as_millis() >= DOM_UPDATE_INTERVAL_MS
+            || needs_redraw.load(Ordering::Relaxed);
 
-        // Poll the virtual DOM
-        let cx = std::task::Context::from_waker(&waker);
-        doc.poll(Some(cx));
+        let t_dirty;
+        let t_poll;
+        let t_resolve;
 
-        // Resolve layout with animation time
-        doc.inner_mut().resolve(animation_time);
+        if do_dom_update {
+            let t0 = Instant::now();
+            doc.vdom.mark_all_dirty();
+            t_dirty = t0.elapsed().as_millis();
 
-        // Log viewport info periodically
-        static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let frame = FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
-        if frame % 300 == 0 {
-            let inner = doc.inner();
-            let vp = inner.viewport();
-            nih_plug::nih_log!(
-                "[FRAME {}] viewport: {}x{} hidpi={} zoom={}, render: {}x{}",
-                frame, vp.window_size.0, vp.window_size.1,
-                vp.hidpi_scale, vp.zoom, physical_width, physical_height
-            );
+            let t1 = Instant::now();
+            let cx = std::task::Context::from_waker(&waker);
+            doc.poll(Some(cx));
+            t_poll = t1.elapsed().as_millis();
+
+            let t2 = Instant::now();
+            doc.inner_mut().resolve(animation_time);
+            t_resolve = t2.elapsed().as_millis();
+
+            self.last_dom_update = Instant::now();
+        } else {
+            // Just poll for async events (user interactions) without full relayout
+            let cx = std::task::Context::from_waker(&waker);
+            doc.poll(Some(cx));
+            t_dirty = 0;
+            t_poll = 0;
+            t_resolve = 0;
         }
 
         // Render at physical size
+        let t3 = Instant::now();
         renderer.render(
             wgpu_state,
             doc,
@@ -530,6 +560,19 @@ impl WindowHandler for DioxusWindowHandler {
             physical_width,
             physical_height,
         );
+        let t_render = t3.elapsed().as_millis();
+
+        // FPS + frame timing log (every second)
+        self.fps_frame_count += 1;
+        let elapsed = self.fps_last_report.elapsed();
+        if elapsed.as_secs_f32() >= 1.0 {
+            let fps = self.fps_frame_count as f32 / elapsed.as_secs_f32();
+            let dom_nodes = doc.inner().tree().len();
+            let dom_update_str = if do_dom_update { "Y" } else { "N" };
+            eprintln!("[FPS-v2] {fps:.1} fps | gap={t_gap}ms dirty={t_dirty}ms poll={t_poll}ms resolve={t_resolve}ms render={t_render}ms | dom={dom_nodes} updated={dom_update_str}");
+            self.fps_frame_count = 0;
+            self.fps_last_report = Instant::now();
+        }
 
         // Reset redraw flag
         self.needs_redraw.store(false, Ordering::Relaxed);

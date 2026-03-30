@@ -9,7 +9,8 @@ use blitz_dom::Document as _;
 use blitz_paint::paint_scene;
 use dioxus_native::DioxusDocument;
 use vello::{
-    RenderParams, Renderer as VelloRenderer, RendererOptions, Scene, peniko::color::AlphaColor,
+    RenderParams, Renderer as VelloRenderer, RendererOptions, Scene,
+    peniko::{color::AlphaColor, kurbo::Affine},
 };
 use wgpu::util::TextureBlitter;
 
@@ -20,10 +21,19 @@ use wgpu::util::TextureBlitter;
 /// (like EQ graphs, spectrum analyzers) to appear within the Dioxus layout.
 pub trait SceneOverlay: 'static {
     /// Paint the overlay into the given scene.
-    /// Called each frame. The scene is empty on entry; append your content.
-    /// `width` and `height` are the full window size in physical pixels.
-    /// `scale` is the display scale factor.
-    fn paint(&mut self, scene: &mut Scene, width: u32, height: u32, scale: f64);
+    ///
+    /// * `transform` — affine transform mapping element-local CSS coords to window
+    ///   physical coords. Pass this to `scene.fill()` / `scene.stroke()`.
+    /// * `width` / `height` — overlay dimensions in CSS pixels.
+    /// * `scale` — display scale factor.
+    fn paint(
+        &mut self,
+        scene: &mut Scene,
+        transform: Affine,
+        width: u32,
+        height: u32,
+        scale: f64,
+    );
 }
 
 /// Manages Vello rendering to a wgpu surface.
@@ -163,7 +173,7 @@ impl Renderer {
                     base_color: AlphaColor::TRANSPARENT,
                     width,
                     height,
-                    antialiasing_method: vello::AaConfig::Msaa16,
+                    antialiasing_method: vello::AaConfig::Area,
                 },
             )
             .expect("Failed to render");
@@ -226,7 +236,7 @@ impl Renderer {
                     base_color: AlphaColor::TRANSPARENT,
                     width,
                     height,
-                    antialiasing_method: vello::AaConfig::Msaa16,
+                    antialiasing_method: vello::AaConfig::Area,
                 },
             )
             .expect("Failed to render");

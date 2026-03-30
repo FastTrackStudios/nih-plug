@@ -22,9 +22,9 @@
 //! struct MyOverlay { /* shared state */ }
 //!
 //! impl SceneOverlay for MyOverlay {
-//!     fn paint(&mut self, scene: &mut vello::Scene, width: u32, height: u32, scale: f64) {
-//!         // width/height are the overlay rect dimensions, NOT the full window.
-//!         // Paint in element-local coordinates (0,0 = top-left of overlay rect).
+//!     fn paint(&mut self, scene: &mut vello::Scene, transform: Affine, width: u32, height: u32, scale: f64) {
+//!         // Use `transform` for all scene.fill()/stroke() calls.
+//!         // width/height are the overlay rect dimensions in CSS pixels.
 //!     }
 //! }
 //!
@@ -150,11 +150,28 @@ impl OverlayRegistry {
 
                 // Clip to the overlay rect (in element-local CSS coords, pre-transform)
                 let clip = Rect::new(0.0, 0.0, rect.width, rect.height);
+
+                // Temporary debug log (throttled)
+                static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if now_ms - LAST_LOG.load(std::sync::atomic::Ordering::Relaxed) > 2000 {
+                    LAST_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!(
+                        "[Overlay] id={} rect=({:.1},{:.1} {:.1}x{:.1}) scale={:.2} window={}x{}",
+                        entry.id, rect.x, rect.y, rect.width, rect.height, scale, width, height
+                    );
+                }
+
                 scene.push_clip_layer(transform, &clip);
 
-                // Paint in element-local coordinates
+                // Paint in element-local coordinates — pass transform so
+                // painters draw in the correct window position.
                 entry.overlay.paint(
                     scene,
+                    transform,
                     rect.width as u32,
                     rect.height as u32,
                     scale,
@@ -163,7 +180,8 @@ impl OverlayRegistry {
                 scene.pop_layer();
             } else {
                 // No rect set — paint in full window space (legacy mode)
-                entry.overlay.paint(scene, width, height, scale);
+                let identity = Affine::IDENTITY;
+                entry.overlay.paint(scene, identity, width, height, scale);
             }
         }
     }
