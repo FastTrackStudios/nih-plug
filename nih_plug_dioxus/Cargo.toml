@@ -53,8 +53,11 @@ parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 futures-util = "0.3"
 pollster = "0.4"
+libc = "0.2"
 # Use the same keyboard-types version as baseview to avoid conflicts
 keyboard-types = "0.6"
+# Same smol_str version as blitz-traits for BlitzKeyEvent text field
+smol_str = "0.2"
 
 # Examples are disabled for now (require additional dependencies from lib-ref)
 # [[example]]
