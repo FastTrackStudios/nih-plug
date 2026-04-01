@@ -57,12 +57,23 @@ pub struct OverlayRect {
     pub height: f64,
 }
 
+/// Whether an overlay paints behind or in front of the DOM.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverlayLayer {
+    /// Paint before the DOM (behind knobs, text, etc.)
+    Background,
+    /// Paint after the DOM (on top of everything).
+    #[default]
+    Foreground,
+}
+
 /// Internal entry for a registered overlay.
 struct OverlayEntry {
     id: u64,
     overlay: Box<dyn SceneOverlay>,
     /// Element-relative rect (CSS pixels). `None` = paint in full window space.
     rect: Option<OverlayRect>,
+    layer: OverlayLayer,
 }
 
 /// Handle to the renderer's overlay registry.
@@ -95,8 +106,17 @@ impl OverlayRegistry {
         }
     }
 
-    /// Register a scene overlay and return its unique ID.
+    /// Register a scene overlay (foreground by default) and return its unique ID.
     pub fn register(&self, overlay: Box<dyn SceneOverlay>) -> u64 {
+        self.register_with_layer(overlay, OverlayLayer::Foreground)
+    }
+
+    /// Register a background overlay (paints behind the DOM).
+    pub fn register_background(&self, overlay: Box<dyn SceneOverlay>) -> u64 {
+        self.register_with_layer(overlay, OverlayLayer::Background)
+    }
+
+    pub fn register_with_layer(&self, overlay: Box<dyn SceneOverlay>, layer: OverlayLayer) -> u64 {
         let mut inner = self.inner.borrow_mut();
         let id = inner.next_id;
         inner.next_id += 1;
@@ -104,6 +124,7 @@ impl OverlayRegistry {
             id,
             overlay,
             rect: None,
+            layer,
         });
         id
     }
@@ -136,8 +157,25 @@ impl OverlayRegistry {
         height: u32,
         scale: f64,
     ) {
+        self.paint_layer(scene, width, height, scale, None);
+    }
+
+    /// Paint overlays for a specific layer (or all if `layer` is `None`).
+    pub fn paint_layer(
+        &self,
+        scene: &mut vello::Scene,
+        width: u32,
+        height: u32,
+        scale: f64,
+        layer: Option<OverlayLayer>,
+    ) {
         let mut inner = self.inner.borrow_mut();
         for entry in &mut inner.entries {
+            if let Some(filter) = layer {
+                if entry.layer != filter {
+                    continue;
+                }
+            }
             if let Some(rect) = &entry.rect {
                 // Skip zero-size rects
                 if rect.width < 1.0 || rect.height < 1.0 {
@@ -150,20 +188,6 @@ impl OverlayRegistry {
 
                 // Clip to the overlay rect (in element-local CSS coords, pre-transform)
                 let clip = Rect::new(0.0, 0.0, rect.width, rect.height);
-
-                // Temporary debug log (throttled)
-                static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                if now_ms - LAST_LOG.load(std::sync::atomic::Ordering::Relaxed) > 2000 {
-                    LAST_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!(
-                        "[Overlay] id={} rect=({:.1},{:.1} {:.1}x{:.1}) scale={:.2} window={}x{}",
-                        entry.id, rect.x, rect.y, rect.width, rect.height, scale, width, height
-                    );
-                }
 
                 scene.push_clip_layer(transform, &clip);
 
@@ -188,9 +212,12 @@ impl OverlayRegistry {
 }
 
 /// Handle returned by `use_scene_overlay` for controlling an overlay's position.
+///
+/// When `OverlayRegistry` is not in context (e.g. standalone `dioxus_native` mode),
+/// the handle is a no-op — `set_rect` does nothing.
 #[derive(Clone)]
 pub struct OverlayHandle {
-    registry: OverlayRegistry,
+    registry: Option<OverlayRegistry>,
     id: u64,
 }
 
@@ -198,9 +225,11 @@ impl OverlayHandle {
     /// Set the overlay's position and size in CSS (logical) pixels, relative to the window.
     ///
     /// Call this each render to keep the overlay positioned correctly as the layout changes.
+    /// No-op when no `OverlayRegistry` is present in context.
     pub fn set_rect(&self, x: f64, y: f64, width: f64, height: f64) {
-        self.registry
-            .set_rect(self.id, OverlayRect { x, y, width, height });
+        if let Some(registry) = &self.registry {
+            registry.set_rect(self.id, OverlayRect { x, y, width, height });
+        }
     }
 }
 
@@ -218,15 +247,41 @@ impl OverlayHandle {
 ///
 /// * `create_overlay` - A closure that creates the overlay. Called once on first render.
 pub fn use_scene_overlay<T: SceneOverlay>(create_overlay: impl FnOnce() -> T) -> OverlayHandle {
-    let (registry, id) = use_hook_with_cleanup(
-        || {
-            let registry = consume_context::<OverlayRegistry>();
-            let overlay = Box::new(create_overlay());
-            let id = registry.register(overlay);
+    use_scene_overlay_on_layer(create_overlay, OverlayLayer::Foreground)
+}
+
+/// Like [`use_scene_overlay`] but paints behind the DOM (background layer).
+///
+/// Use this for waveform displays, spectrums, or other visualizations
+/// that should appear behind interactive DOM elements like knobs.
+pub fn use_scene_overlay_background<T: SceneOverlay>(
+    create_overlay: impl FnOnce() -> T,
+) -> OverlayHandle {
+    use_scene_overlay_on_layer(create_overlay, OverlayLayer::Background)
+}
+
+pub fn use_scene_overlay_on_layer<T: SceneOverlay>(
+    create_overlay: impl FnOnce() -> T,
+    layer: OverlayLayer,
+) -> OverlayHandle {
+    let (registry, id): (Option<OverlayRegistry>, u64) = use_hook_with_cleanup(
+        move || -> (Option<OverlayRegistry>, u64) {
+            let registry: Option<OverlayRegistry> = try_consume_context::<OverlayRegistry>();
+            let id: u64 = if let Some(ref reg) = registry {
+                let overlay = Box::new(create_overlay());
+                reg.register_with_layer(overlay, layer)
+            } else {
+                // No registry in context (e.g. standalone dioxus_native / dx serve).
+                // Drop the overlay and return a no-op id.
+                drop(create_overlay());
+                0
+            };
             (registry, id)
         },
-        |(registry, id)| {
-            registry.unregister(id);
+        |(registry, id): (Option<OverlayRegistry>, u64)| {
+            if let Some(reg) = registry {
+                reg.unregister(id);
+            }
         },
     );
     OverlayHandle {

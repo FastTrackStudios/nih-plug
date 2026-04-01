@@ -2,10 +2,14 @@
 //!
 //! This module provides:
 //! - `open_standalone` / `open_standalone_with_state`: windowed rendering for interactive testing
+//!   (uses baseview, fully featured including VelloCanvas overlays)
+//! - `launch_native_app_with_state`: launch via dioxus_native (winit, supports `dx serve`)
+//!   VelloCanvas overlays are no-op in this mode — layout and CSS UI work.
 //! - `open_parented_x11`: parented X11 window (simulates DAW embedding)
 //! - `render_screenshot`: headless offscreen rendering to RGBA pixels for automated testing
 
 use crate::context::ParamContext;
+use crate::custom_paint::OverlayRegistry;
 use crate::renderer::Renderer;
 use crate::state::DioxusState;
 use crate::SharedState;
@@ -40,7 +44,10 @@ impl GuiContext for StandaloneGuiContext {
     }
 
     unsafe fn raw_begin_set_parameter(&self, _param: ParamPtr) {}
-    unsafe fn raw_set_parameter_normalized(&self, _param: ParamPtr, _normalized: f32) {}
+    unsafe fn raw_set_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+        // Actually update the atomic so standalone demos and dx-serve respond to knob changes.
+        unsafe { param.set_normalized_value(normalized) };
+    }
     unsafe fn raw_end_set_parameter(&self, _param: ParamPtr) {}
 
     fn get_state(&self) -> PluginState {
@@ -111,6 +118,32 @@ pub fn open_standalone_with_state(
             }
         },
     );
+}
+
+/// Launch a Dioxus native desktop app via the standard `dioxus_native::launch_cfg` path
+/// (winit + blitz-shell). This is the entry point for `dx serve` development.
+///
+/// Provides a no-op `ParamContext` so knob widgets compile and mount, but
+/// parameter automation is not connected. Pass `SharedState` with mock data
+/// to populate UI state.
+///
+/// # VelloCanvas overlays
+/// Vello overlays (spectrum, waveform) will be invisible because `OverlayRegistry` is
+/// not connected to the blitz-shell render loop. All CSS-based UI renders normally.
+pub fn launch_native_app(app: fn() -> Element, shared_state: Option<crate::SharedState>) {
+    let gui_context: std::sync::Arc<dyn GuiContext> = std::sync::Arc::new(StandaloneGuiContext);
+    let needs_redraw = std::sync::Arc::new(AtomicBool::new(true));
+    let param_ctx = ParamContext::new(gui_context, needs_redraw);
+
+    let mut contexts: Vec<Box<dyn Fn() -> Box<dyn std::any::Any> + Send + Sync>> = vec![
+        Box::new(move || Box::new(param_ctx.clone()) as Box<dyn std::any::Any>),
+    ];
+
+    if let Some(state) = shared_state {
+        contexts.push(Box::new(move || Box::new(state.clone()) as Box<dyn std::any::Any>));
+    }
+
+    dioxus_native::launch_cfg(app, contexts, vec![])
 }
 
 /// Open a Dioxus component as a child of an existing X11 window.
@@ -277,10 +310,13 @@ pub fn render_screenshot(
     let param_context = ParamContext::new(gui_context, needs_redraw);
     let dioxus_state = DioxusState::new(move || (width, height));
 
+    let overlay_registry = OverlayRegistry::new();
+    let overlay_registry_for_paint = overlay_registry.clone();
     dioxus_doc.vdom.in_scope(ScopeId::ROOT, move || {
         provide_context(doc_proxy_rc as Rc<dyn document::Document>);
         provide_context(param_context);
         provide_context(dioxus_state);
+        provide_context(overlay_registry);
         if let Some(state) = shared_state {
             provide_context(state);
         }
@@ -292,11 +328,15 @@ pub fn render_screenshot(
         dioxus_doc.create_head_element(&name, &attrs, &contents);
     }
 
-    // Poll VirtualDom and resolve layout
+    // Poll VirtualDom and resolve layout.
+    // Multiple poll cycles needed: onmounted fires after initial build,
+    // use_effect spawns async tasks, and those need another poll to complete.
     let waker = futures_util::task::waker(Arc::new(ScreenshotWaker));
-    let cx = std::task::Context::from_waker(&waker);
-    dioxus_doc.poll(Some(cx));
-    dioxus_doc.inner_mut().resolve(0.0);
+    for _ in 0..4 {
+        let cx = std::task::Context::from_waker(&waker);
+        dioxus_doc.poll(Some(cx));
+        dioxus_doc.inner_mut().resolve(0.0);
+    }
 
     // --- Render via Vello ---
     let mut vello_renderer = VelloRenderer::new(
@@ -311,12 +351,27 @@ pub fn render_screenshot(
     .expect("Failed to create Vello renderer");
 
     let mut scene = Scene::new();
+
+    // Paint background overlays (behind DOM)
+    use crate::custom_paint::OverlayLayer;
+    overlay_registry_for_paint.paint_layer(
+        &mut scene, width, height, 1.0,
+        Some(OverlayLayer::Background),
+    );
+
+    // Paint the DOM
     paint_scene(
         &mut VelloScenePainter::new(&mut scene),
         &*dioxus_doc.inner(),
         1.0, // scale
         width,
         height,
+    );
+
+    // Paint foreground overlays (on top of DOM)
+    overlay_registry_for_paint.paint_layer(
+        &mut scene, width, height, 1.0,
+        Some(OverlayLayer::Foreground),
     );
 
     // Vello renders to Rgba8Unorm (required for compute shaders)

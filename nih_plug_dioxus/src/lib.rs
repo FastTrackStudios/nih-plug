@@ -147,7 +147,7 @@ mod window;
 mod window_softbuffer;
 
 pub use context::{ParamContext, use_param, use_param_context, use_param_normalized};
-pub use standalone::{open_parented_x11, open_standalone, open_standalone_with_state, render_screenshot};
+pub use standalone::{launch_native_app, open_parented_x11, open_standalone, open_standalone_with_state, render_screenshot};
 pub use state::DioxusState;
 
 /// Compiled Tailwind CSS with shadcn/lumen-blocks theme variables.
@@ -187,7 +187,8 @@ pub mod prelude {
     pub use crate::create_dioxus_editor;
     pub use crate::create_dioxus_editor_with_state;
     pub use crate::custom_paint::{
-        OverlayHandle, OverlayRegistry, SceneOverlay, use_scene_overlay, vello,
+        OverlayHandle, OverlayLayer, OverlayRegistry, SceneOverlay, use_scene_overlay,
+        use_scene_overlay_background, use_scene_overlay_on_layer, vello,
     };
     #[cfg(feature = "embedded")]
     pub use crate::embedded::DioxusEmbeddedEditor;
